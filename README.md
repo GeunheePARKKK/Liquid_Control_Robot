@@ -12,6 +12,9 @@
 
 # POWERSHELL에서 업데이트하는 법
 git add .
+
 git commit -m "Update"
+
 git pull --rebase origin main
+
 git push

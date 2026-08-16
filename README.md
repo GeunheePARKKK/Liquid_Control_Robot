@@ -10,6 +10,8 @@
 현재는 프로젝트 구조만 구성한 초기 단계입니다.
 
 # POWERSHELL에서 업데이트하는 법
+로컬에서 파일 수정 후 (ex. 폴더 생성, 변경, 삭제 등)
+
 git add .
 
 git commit -m "Update"

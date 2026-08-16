@@ -12,7 +12,7 @@
 
 역할별 문서:
 
-- [담당 1: GL60II 및 CAN 통신](ai-handoff/MOTOR_CAN_TASK.md)
+- [담당 1: GL60II 및 CAN 통신](docs/MOTOR_CAN_TASK/MOTOR_CAN_TASK.md)
 - [담당 2: 이중 IMU 및 데이터](ai-handoff/SENSOR_DATA_TASK.md)
 - [담당 3: 제어 알고리즘 및 통합](ai-handoff/CONTROL_INTEGRATION_TASK.md)
 

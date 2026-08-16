@@ -12,8 +12,8 @@
 
 역할별 문서:
 
-- [담당 1: GL60II 및 CAN 통신](docs/MOTOR_CAN_TASK/MOTOR_CAN_TASK.md)
-- [담당 2: 이중 IMU 및 데이터](ai-handoff/SENSOR_DATA_TASK.md)
+- [담당 1: GL60II 및 CAN 통신](docs/MOTOR_CAN_TASK/README.md)
+- [담당 2: 이중 IMU 및 데이터](docs/SENSOR_DATA_TASK/SENSOR_DATA_TASK.md)
 - [담당 3: 제어 알고리즘 및 통합](ai-handoff/CONTROL_INTEGRATION_TASK.md)
 
 각 담당자는 AI가 제안한 변경사항을 검토하고 승인한 뒤 자신의 브랜치에서 작업합니다. 핀, 센서 종류, 통신 설정과 안전 제한은 `Config.h/.cpp`에서만 정의하며, 다른 모듈은 이를 읽어서 사용합니다.

@@ -137,7 +137,7 @@ Tools -> USB CDC On Boot  -> Enabled
 
 **모터 #1 기준. 문제 생기면 이 값으로 되돌린다.**
 
-원본 화면 캡처: `docs/img/motor_params_original.png` (아직 리포에 추가되지 않음 — 추가 시 이 문서에 링크 걸 것)
+원본 화면 캡처: [`docs/img/motor_params_original.png`](../docs/img/motor_params_original.png)
 
 ### Drive parameters
 

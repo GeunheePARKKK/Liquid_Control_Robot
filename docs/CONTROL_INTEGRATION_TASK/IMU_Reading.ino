@@ -36,10 +36,24 @@
  *   포함된다. 통신 오류만 보려면 센서를 완전히 고정한 상태에서 측정할 것.
  *
  * 측정 이력 (2026-08-26, 벤치 테스트)
- *   정지          : 오류 0 / 304 샘플  → 배선 정상 확인
- *   가볍게 움직임 : 최대연속 7~8  (0.08초) → 무해
- *   격하게 흔듦   : 최대연속 44   (0.44초), |a| 2.77g 로 ±2g 포화
- *                   → 이 때문에 ±4g 로 상향 + 하드 컷 대신 신뢰도 가중으로 변경
+ *
+ *   [1차 — 하드 컷 / ±2g]
+ *     정지          : 오류 0 / 304 샘플  → 배선 정상 확인
+ *     가볍게 움직임 : 최대연속 7~8  (0.08초)
+ *     격하게 흔듦   : 최대연속 44   (0.44초), |a| 2.77g 로 ±2g 포화
+ *                     → ±4g 상향 + 하드 컷 대신 신뢰도 가중으로 변경
+ *
+ *   [2차 — 신뢰도 가중 / ±4g]
+ *     정지          : 무보정 0, pitch_acc 흔들림 0.25°
+ *     가볍게 움직임 : 무보정 0     (1차의 최대연속 14 → 0)
+ *     격하게 흔듦   : 최대연속 12  (0.44초 → 0.12초, 3.7배 단축)
+ *                     |a| 3.21g 까지 포화 없이 측정됨
+ *
+ * 모터 진동 주의
+ *   모터에 전원이 들어간 상태로 측정하면 정지 상태인데도 pitch_acc 흔들림이
+ *   0.25° → 9.56° 로 악화됐다 (통신 오류는 0). 옆방향 진동은 |a| 를 거의
+ *   바꾸지 않아 신뢰도 가중으로 걸러지지 않는다.
+ *   → 짐벌 실장 시 트레이 IMU 를 방진 마운트로 절연할 것.
  * -----------------------------------------------------------------------------
  */
 
@@ -90,6 +104,7 @@ const float ACC_MAG_DEAD      = 0.05;  // 이보다 작으면 센서 파워다�
 // ── 상태 변수 ──
 float pitch_filtered = 0, roll_filtered = 0;
 float gyro_bias_x = 0, gyro_bias_y = 0;
+float g_scale = 1.0;              // 정지 시 측정한 1g 크기 (setup 에서 결정)
 
 unsigned long lastLoop = 0, lastPrint = 0, lastCheck = 0;
 uint32_t n_win = 0, err_win = 0, err_reset = 0;
@@ -213,18 +228,34 @@ void setup() {
   configSensor();
   dumpDiag();
 
-  // ── 자이로 영점 (정지 상태 유지) ──
+  /* ── 자이로 영점 + 중력 스케일 (정지 상태 유지) ──
+   * 가속도계는 개체 편차로 1g 를 정확히 1.000 으로 읽지 않는다 (실측 0.97).
+   * 그대로 두면 정지 상태에서도 trust 가 1.00 에 못 미치고, 신뢰도 감쇠 기준도
+   * 실제 1g 가 아닌 값에서 출발하므로 정지 시 측정값으로 정규화한다.
+   */
   Serial.println(">>> 캘리브레이션 중... 움직이지 마세요");
-  long sgx = 0, sgy = 0;
+  long  sgx = 0, sgy = 0;
+  float smag = 0;
   for (int i = 0; i < 200; i++) {
     int16_t ax, ay, az, gx, gy, gz;
     readIMU(ax, ay, az, gx, gy, gz);
     sgx += gx;  sgy += gy;
+    float fax = ax, fay = ay, faz = az;
+    smag += sqrtf(fax * fax + fay * fay + faz * faz) / G_LSB;
     delay(5);
   }
   gyro_bias_x = (float)sgx / 200.0;
   gyro_bias_y = (float)sgy / 200.0;
-  Serial.printf("gyro bias  x:%.1f  y:%.1f\n", gyro_bias_x, gyro_bias_y);
+
+  float measured = smag / 200.0;
+  // 값이 터무니없으면(센서 이상/캘리브 중 움직임) 정규화를 포기하고 1.0 유지
+  if (measured > 0.5f && measured < 1.5f) {
+    g_scale = measured;
+  } else {
+    Serial.printf("!! 중력 스케일 이상 (%.3f) — 정규화 생략\n", measured);
+  }
+  Serial.printf("gyro bias  x:%.1f  y:%.1f   g_scale:%.4f\n",
+                gyro_bias_x, gyro_bias_y, g_scale);
 
   // ── 가속도 기준 초기값 (수렴 시간 단축) ──
   int16_t ax, ay, az, gx, gy, gz;
@@ -265,7 +296,8 @@ void loop() {
      * (2)는 짐벌 제어 진입 후에도 계속 필요한 로직이므로 유지할 것.
      */
     float fax = ax, fay = ay, faz = az;
-    float a_mag = sqrtf(fax * fax + fay * fay + faz * faz) / G_LSB;
+    // g_scale 로 나눠 정지 시 정확히 1.000 이 되도록 정규화
+    float a_mag = sqrtf(fax * fax + fay * fay + faz * faz) / G_LSB / g_scale;
 
     // 1g 에서 벗어난 만큼 가속도계 반영 비중을 줄인다 (0.0 ~ 1.0)
     float dev   = fabsf(a_mag - 1.0f);

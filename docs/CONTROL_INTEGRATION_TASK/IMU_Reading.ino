@@ -19,9 +19,22 @@
  *
  * 포함된 방어 로직
  *   1) 부팅 시 레지스터 덤프로 배선/설정 자체 진단
- *   2) 센서 리셋(브라운아웃) 자동 감지 및 재초기화
+ *   2) 센서 리셋(브라운아웃) 감지 및 재초기화 — 즉시 + 1초 주기 이중 확인
  *   3) 가속도 크기(|a|) 검사로 불량 샘플 제거
  *      → 깨진 SPI 샘플 차단 + 선형 가속도로 인한 기울기 오염 방지
+ *   4) 연속 거부 구간(최대연속) 추적 — 아래 참고
+ *
+ * "최대연속" 을 보는 이유
+ *   샘플을 버리면 대체값이 생기는 게 아니라 그 순간 가속도 보정이 빠진다.
+ *   즉 자이로 단독 적분 구간이 되는데, 자이로는 짧게는 정확하고 길어지면 틀어진다.
+ *   따라서 버린 총 개수보다 연속 길이가 중요하다. (1샘플 = 0.01초)
+ *
+ *     최대연속 ≤ 5   → 0.05초. 흩어진 오류. 무해 ✅
+ *     최대연속 ~50   → 0.5초.  드리프트 발생 ❌
+ *     최대연속 100+  → 1초 이상. 배선 수리 필요 ❌
+ *
+ *   bit_err 에는 실제 가속(로봇 주행 등)으로 인한 정상 거부도 포함되므로,
+ *   센서를 완전히 고정한 상태에서 측정해야 통신 오류만 구분된다.
  * -----------------------------------------------------------------------------
  */
 
@@ -59,8 +72,9 @@ const float dt       = 0.01;      // 100Hz
 const float alpha_cf = 0.98;      // 자이로 신뢰도 98%
 
 // ── 가속도 신뢰 구간 (정지 시 |a| = 1.0g) ──
-const float ACC_MAG_MIN = 0.85;
-const float ACC_MAG_MAX = 1.15;
+const float ACC_MAG_MIN  = 0.85;
+const float ACC_MAG_MAX  = 1.15;
+const float ACC_MAG_DEAD = 0.05;   // 이보다 작으면 센서 파워다운으로 간주
 
 // ── 상태 변수 ──
 float pitch_filtered = 0, roll_filtered = 0;
@@ -68,6 +82,15 @@ float gyro_bias_x = 0, gyro_bias_y = 0;
 
 unsigned long lastLoop = 0, lastPrint = 0, lastCheck = 0;
 uint32_t n_total = 0, err_bit = 0, err_reset = 0;
+
+/* 연속 거부 구간 추적
+ * 샘플을 버리면 그 순간 가속도 보정 없이 자이로만 적분한다.
+ * 흩어진 거부는 무해하지만 연속으로 뭉치면 각도가 틀어지므로,
+ * 버린 총 개수보다 "최대 몇 개가 연속으로 버려졌는가"가 중요하다.
+ *   최대연속 ≤ 5   (0.05초) → 무해
+ *   최대연속 ~50  (0.5초)  → 드리프트 발생, 배선 점검
+ */
+uint16_t rej_run = 0, rej_run_max = 0;
 
 
 // =============================================================================
@@ -237,14 +260,26 @@ void loop() {
     if (!acc_ok) err_bit++;
 
     if (acc_ok) {
+      rej_run = 0;
       pitch_filtered = alpha_cf * (pitch_filtered + rate_pitch * dt) + (1.0 - alpha_cf) * pitch_acc;
       roll_filtered  = alpha_cf * (roll_filtered  + rate_roll  * dt) + (1.0 - alpha_cf) * roll_acc;
     } else {
+      if (++rej_run > rej_run_max) rej_run_max = rej_run;
       pitch_filtered += rate_pitch * dt;           // 자이로만
       roll_filtered  += rate_roll  * dt;
     }
 
-    // ── 센서 리셋(브라운아웃) 감지 및 복구 ──
+    /* ── 센서 리셋 즉시 감지 ──
+     * |a| 가 0에 가까우면 출력 레지스터가 전부 0이라는 뜻 = 파워다운 상태.
+     * 아래 1초 주기 점검을 기다리지 않고 그 자리에서 복구한다.
+     */
+    if (a_mag < ACC_MAG_DEAD && readReg(REG_CTRL1_XL) != CTRL1_XL_VAL) {
+      err_reset++;
+      Serial.println("!! 센서 파워다운 감지 — 즉시 재설정");
+      configSensor();
+    }
+
+    // ── 주기 점검 (즉시 감지에 걸리지 않는 설정 변형 대비) ──
     if (millis() - lastCheck > 1000) {
       lastCheck = millis();
       uint8_t c1 = readReg(REG_CTRL1_XL);
@@ -253,8 +288,10 @@ void loop() {
         Serial.printf("!! 센서 리셋 감지 CTRL1_XL=0x%02X — 재설정\n", c1);
         configSensor();
       }
-      Serial.printf("[stat] reset:%lu  bit_err:%lu / %lu  (|a|=%.3f)\n",
-                    err_reset, err_bit, n_total, a_mag);
+      Serial.printf("[stat] reset:%lu  bit_err:%lu / %lu (%.1f%%)  최대연속:%u  (|a|=%.3f)\n",
+                    err_reset, err_bit, n_total,
+                    100.0f * err_bit / (n_total ? n_total : 1),
+                    rej_run_max, a_mag);
     }
 
     // ── 시리얼 플로터 출력 (10Hz) ──
@@ -273,9 +310,11 @@ void loop() {
  *  2) 기울임 : 30° 기울이면 30° 출력
  *  3) 축·부호 : 빠르게 흔들 때 pitch 와 pitch_acc 가 같이 움직여야 정상.
  *               반대로 튀거나 발산하면 rate_pitch / rate_roll 부호를 반전.
- *  4) [stat] 로그 :
- *       reset 증가   → 전원 문제 (VIN/GND 접촉, 디커플링 100nF 추가)
- *       bit_err 증가 → 신호선 접촉 불량 (SDO/SCL/SDA 점퍼 확인)
+ *  4) [stat] 로그 — 센서를 책상에 고정하고 30초간 손대지 말 것
+ *       reset 증가       → 전원 문제 (VIN/GND 접촉, 디커플링 100nF 추가)
+ *       최대연속 ≤ 5     → 정상. 제어 단계로 진행 가능
+ *       최대연속 50 이상 → 신호선 접촉 불량 (SDO/SCL/SDA 점퍼 확인, 납땜 검토)
+ *       (움직이는 중이면 bit_err 는 정상적으로 올라가므로 반드시 정지 상태에서 볼 것)
  *  5) 포화 : 주행 중 pitch_acc 가 끊기면 ±2g 포화.
  *            CTRL1_XL_VAL → 0x68 (±4g), G_LSB → 8192.0 으로 변경.
  * ---------------------------------------------------------------------------*/

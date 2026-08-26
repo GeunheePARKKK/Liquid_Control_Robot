@@ -5,7 +5,7 @@
  *
  *   MCU     : ESP32-S3
  *   통신    : SPI 4-wire, 1MHz, MODE0
- *   센서    : LSM6DSOX  (±2g / ±2000dps, ODR 416Hz)
+ *   센서    : LSM6DSOX  (±4g / ±2000dps, ODR 416Hz)
  *   출력    : 100Hz 제어 루프 / 10Hz 시리얼 출력 (시리얼 플로터 호환 포맷)
  *
  * 배선 (hardware/배선도.md 참고)
@@ -20,21 +20,26 @@
  * 포함된 방어 로직
  *   1) 부팅 시 레지스터 덤프로 배선/설정 자체 진단
  *   2) 센서 리셋(브라운아웃) 감지 및 재초기화 — 즉시 + 1초 주기 이중 확인
- *   3) 가속도 크기(|a|) 검사로 불량 샘플 제거
+ *   3) |a| 기반 가속도 신뢰도 가중 — 1g 에서 멀수록 가속도계 반영을 줄임
  *      → 깨진 SPI 샘플 차단 + 선형 가속도로 인한 기울기 오염 방지
- *   4) 연속 거부 구간(최대연속) 추적 — 아래 참고
+ *   4) 연속 무보정 구간 추적 — 아래 참고
  *
- * "최대연속" 을 보는 이유
- *   샘플을 버리면 대체값이 생기는 게 아니라 그 순간 가속도 보정이 빠진다.
- *   즉 자이로 단독 적분 구간이 되는데, 자이로는 짧게는 정확하고 길어지면 틀어진다.
- *   따라서 버린 총 개수보다 연속 길이가 중요하다. (1샘플 = 0.01초)
+ * "연속" 을 보는 이유
+ *   가속도 보정이 빠지면 그 순간은 자이로 단독 적분이 된다.
+ *   자이로는 짧게는 정확하고 길어지면 틀어지므로, 무보정 샘플의 총 개수보다
+ *   연속으로 몇 개가 이어졌는가가 중요하다. (1샘플 = 0.01초)
  *
- *     최대연속 ≤ 5   → 0.05초. 흩어진 오류. 무해 ✅
- *     최대연속 ~50   → 0.5초.  드리프트 발생 ❌
- *     최대연속 100+  → 1초 이상. 배선 수리 필요 ❌
+ *     연속 ≤ 5    → 0.05초. 무해 ✅
+ *     연속 ~50    → 0.5초.  드리프트 발생 ❌
  *
- *   bit_err 에는 실제 가속(로봇 주행 등)으로 인한 정상 거부도 포함되므로,
- *   센서를 완전히 고정한 상태에서 측정해야 통신 오류만 구분된다.
+ *   "무보정" 에는 실제 가속(로봇 주행, 손으로 흔들기)으로 인한 정상 감쇠도
+ *   포함된다. 통신 오류만 보려면 센서를 완전히 고정한 상태에서 측정할 것.
+ *
+ * 측정 이력 (2026-08-26, 벤치 테스트)
+ *   정지          : 오류 0 / 304 샘플  → 배선 정상 확인
+ *   가볍게 움직임 : 최대연속 7~8  (0.08초) → 무해
+ *   격하게 흔듦   : 최대연속 44   (0.44초), |a| 2.77g 로 ±2g 포화
+ *                   → 이 때문에 ±4g 로 상향 + 하드 컷 대신 신뢰도 가중으로 변경
  * -----------------------------------------------------------------------------
  */
 
@@ -58,39 +63,44 @@
 #define REG_OUTX_L_G   0x22    // 자이로 X부터 12바이트 (자이로 → 가속도 순)
 
 #define WHO_AM_I_VAL   0x6C
-#define CTRL1_XL_VAL   0x60    // 가속도 416Hz, ±2g
+#define CTRL1_XL_VAL   0x68    // 가속도 416Hz, ±4g  (±2g 는 0x60 — 주행 중 포화함)
 #define CTRL2_G_VAL    0x6C    // 자이로  416Hz, ±2000dps
 #define CTRL3_C_VAL    0x44    // BDU=1, IF_INC=1
 
 // ── 감도 ──
-const float G_LSB    = 16384.0;   // ±2g   : 1g 당 LSB
+const float G_LSB    = 8192.0;    // ±4g   : 1g 당 LSB   (±2g 이면 16384.0)
 const float GYRO_LSB = 14.286;    // ±2000dps : 1dps 당 LSB (70 mdps/LSB)
                                   // 주의: ICM/MPU 계열의 16.4가 아님
 
 // ── 상보 필터 ──
 const float dt       = 0.01;      // 100Hz
-const float alpha_cf = 0.98;      // 자이로 신뢰도 98%
+const float alpha_cf = 0.98;      // 정지 시 자이로 신뢰도 98%
 
-// ── 가속도 신뢰 구간 (정지 시 |a| = 1.0g) ──
-const float ACC_MAG_MIN  = 0.85;
-const float ACC_MAG_MAX  = 1.15;
-const float ACC_MAG_DEAD = 0.05;   // 이보다 작으면 센서 파워다운으로 간주
+/* ── 가속도 신뢰도 (정지 시 |a| = 1.0g) ──
+ * 예전에는 밴드를 벗어나면 샘플을 통째로 버렸는데, 그러면 가속 구간에서
+ * 수십 샘플이 연속으로 빠져 그동안 자이로 단독 적분이 되어 각도가 무너졌다.
+ * 지금은 1g 에서 멀어질수록 가속도계 반영 비중을 서서히 줄인다.
+ *   |a| = 1.0g              → trust 1.00 (평소대로 보정)
+ *   |a| = 1.25g             → trust 0.50 (절반만 반영)
+ *   |a| = 1.5g 이상         → trust 0.00 (자이로 단독)
+ */
+const float ACC_TRUST_FALLOFF = 0.5;
+const float ACC_MAG_DEAD      = 0.05;  // 이보다 작으면 센서 파워다운으로 간주
 
 // ── 상태 변수 ──
 float pitch_filtered = 0, roll_filtered = 0;
 float gyro_bias_x = 0, gyro_bias_y = 0;
 
 unsigned long lastLoop = 0, lastPrint = 0, lastCheck = 0;
-uint32_t n_total = 0, err_bit = 0, err_reset = 0;
+uint32_t n_win = 0, err_win = 0, err_reset = 0;
 
-/* 연속 거부 구간 추적
- * 샘플을 버리면 그 순간 가속도 보정 없이 자이로만 적분한다.
- * 흩어진 거부는 무해하지만 연속으로 뭉치면 각도가 틀어지므로,
- * 버린 총 개수보다 "최대 몇 개가 연속으로 버려졌는가"가 중요하다.
- *   최대연속 ≤ 5   (0.05초) → 무해
- *   최대연속 ~50  (0.5초)  → 드리프트 발생, 배선 점검
+/* 연속 무보정 구간 추적 (trust = 0 인 샘플이 몇 개나 이어졌는가)
+ * 흩어진 거부는 무해하지만 연속으로 뭉치면 각도가 틀어진다. (1샘플 = 0.01초)
+ *   ≤ 5   (0.05초) → 무해
+ *   ~50   (0.5초)  → 드리프트 발생
+ * "최근" 은 직전 1초 구간, "전체" 는 부팅 이후 최고 기록.
  */
-uint16_t rej_run = 0, rej_run_max = 0;
+uint16_t rej_run = 0, rej_run_win = 0, rej_run_max = 0;
 
 
 // =============================================================================
@@ -236,7 +246,6 @@ void loop() {
 
     int16_t ax, ay, az, gx, gy, gz;
     readIMU(ax, ay, az, gx, gy, gz);
-    n_total++;
 
     // ── 자이로 → dps ──
     float rate_pitch = ((float)gx - gyro_bias_x) / GYRO_LSB;
@@ -246,27 +255,38 @@ void loop() {
     float pitch_acc = atan2((float)ay,  sqrt(pow((float)ax, 2) + pow((float)az, 2))) * (180.0 / PI);
     float roll_acc  = atan2((float)-ax, sqrt(pow((float)ay, 2) + pow((float)az, 2))) * (180.0 / PI);
 
-    /* ── 가속도 크기 검사 ──────────────────────────────────────────────
-     * 정지 상태에서 |a| 는 반드시 1.0g.
-     * 벗어나면 두 경우 중 하나이며, 어느 쪽이든 가속도계를
-     * 기울기 기준으로 쓸 수 없으므로 이번 샘플은 자이로만 적분한다.
+    /* ── 가속도 신뢰도 가중 ────────────────────────────────────────────
+     * 정지 상태에서 |a| 는 반드시 1.0g. 벗어나면 두 경우 중 하나다.
      *   (1) SPI 통신 오류로 값이 깨짐
      *   (2) 실제 선형 가속 중 → 중력 방향 추정 불가
+     * 어느 쪽이든 가속도계를 기울기 기준으로 그대로 쓸 수 없다.
+     * 다만 통째로 버리면 가속 구간에서 수십 샘플이 연속으로 빠지므로,
+     * 버리는 대신 1g 에서 멀어진 만큼 반영 비중만 줄인다.
      * (2)는 짐벌 제어 진입 후에도 계속 필요한 로직이므로 유지할 것.
      */
     float fax = ax, fay = ay, faz = az;
     float a_mag = sqrtf(fax * fax + fay * fay + faz * faz) / G_LSB;
-    bool  acc_ok = (a_mag > ACC_MAG_MIN && a_mag < ACC_MAG_MAX);
-    if (!acc_ok) err_bit++;
 
-    if (acc_ok) {
-      rej_run = 0;
-      pitch_filtered = alpha_cf * (pitch_filtered + rate_pitch * dt) + (1.0 - alpha_cf) * pitch_acc;
-      roll_filtered  = alpha_cf * (roll_filtered  + rate_roll  * dt) + (1.0 - alpha_cf) * roll_acc;
+    // 1g 에서 벗어난 만큼 가속도계 반영 비중을 줄인다 (0.0 ~ 1.0)
+    float dev   = fabsf(a_mag - 1.0f);
+    float trust = constrain(1.0f - dev / ACC_TRUST_FALLOFF, 0.0f, 1.0f);
+
+    // trust 만큼만 가속도 보정이 섞이도록 alpha 를 끌어올린다
+    //   trust = 1 → alpha = alpha_cf (평소)
+    //   trust = 0 → alpha = 1.0      (자이로 단독)
+    float alpha = 1.0f - (1.0f - alpha_cf) * trust;
+
+    pitch_filtered = alpha * (pitch_filtered + rate_pitch * dt) + (1.0f - alpha) * pitch_acc;
+    roll_filtered  = alpha * (roll_filtered  + rate_roll  * dt) + (1.0f - alpha) * roll_acc;
+
+    // 진단: 완전히 무보정(trust = 0)인 샘플이 연속으로 몇 개나 이어지는지
+    n_win++;
+    if (trust <= 0.0f) {
+      err_win++;
+      if (++rej_run > rej_run_win) rej_run_win = rej_run;
+      if (rej_run > rej_run_max)   rej_run_max = rej_run;
     } else {
-      if (++rej_run > rej_run_max) rej_run_max = rej_run;
-      pitch_filtered += rate_pitch * dt;           // 자이로만
-      roll_filtered  += rate_roll  * dt;
+      rej_run = 0;
     }
 
     /* ── 센서 리셋 즉시 감지 ──
@@ -288,10 +308,11 @@ void loop() {
         Serial.printf("!! 센서 리셋 감지 CTRL1_XL=0x%02X — 재설정\n", c1);
         configSensor();
       }
-      Serial.printf("[stat] reset:%lu  bit_err:%lu / %lu (%.1f%%)  최대연속:%u  (|a|=%.3f)\n",
-                    err_reset, err_bit, n_total,
-                    100.0f * err_bit / (n_total ? n_total : 1),
-                    rej_run_max, a_mag);
+      // 누적이 아니라 직전 1초 구간 기준으로 출력 (누적은 한 번 튀면 계속 남아 헷갈림)
+      Serial.printf("[stat] reset:%lu  무보정:%lu/%lu  연속:%u최근/%u전체  |a|=%.2f trust=%.2f\n",
+                    err_reset, err_win, n_win,
+                    rej_run_win, rej_run_max, a_mag, trust);
+      n_win = 0;  err_win = 0;  rej_run_win = 0;
     }
 
     // ── 시리얼 플로터 출력 (10Hz) ──
@@ -312,9 +333,10 @@ void loop() {
  *               반대로 튀거나 발산하면 rate_pitch / rate_roll 부호를 반전.
  *  4) [stat] 로그 — 센서를 책상에 고정하고 30초간 손대지 말 것
  *       reset 증가       → 전원 문제 (VIN/GND 접촉, 디커플링 100nF 추가)
- *       최대연속 ≤ 5     → 정상. 제어 단계로 진행 가능
- *       최대연속 50 이상 → 신호선 접촉 불량 (SDO/SCL/SDA 점퍼 확인, 납땜 검토)
- *       (움직이는 중이면 bit_err 는 정상적으로 올라가므로 반드시 정지 상태에서 볼 것)
- *  5) 포화 : 주행 중 pitch_acc 가 끊기면 ±2g 포화.
- *            CTRL1_XL_VAL → 0x68 (±4g), G_LSB → 8192.0 으로 변경.
+ *       무보정 0/N       → 정상. 제어 단계로 진행 가능
+ *       무보정 계속 증가 → 신호선 접촉 불량 (SDO/SCL/SDA 점퍼 확인, 납땜 검토)
+ *       ※ 움직이는 중이면 무보정 카운트는 정상적으로 올라간다.
+ *         "연속" 은 최근 1초 구간(앞)과 부팅 이후 최고 기록(뒤)을 함께 표시한다.
+ *  5) 포화 : 격한 동작에서도 |a| 가 3.9g 를 넘으면 ±4g 포화.
+ *            CTRL1_XL_VAL → 0x6C (±8g), G_LSB → 4096.0 으로 변경.
  * ---------------------------------------------------------------------------*/

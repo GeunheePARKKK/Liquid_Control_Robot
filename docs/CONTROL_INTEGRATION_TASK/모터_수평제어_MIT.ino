@@ -43,7 +43,8 @@
  *   stop      비활성화
  *   z         현재 위치를 모터 영점으로
  *   g<값>     제어 게인       예) g0.5
- *   kp<값>    모터 강성       예) kp30    [N/rad]   0~500
+ *   kp<값>    모터 강성       예) kp5     [N/rad]   0~500
+ *             ⚠ MIT 는 속도 제한이 없다. τ = Kp × 오차 가 즉시 나간다
  *   kd<값>    모터 감쇠       예) kd1.5   [N·s/rad] 0~5   ← 발진 잡는 값
  *   f<값>     지령 필터       예) f0.1
  *   d<값>     CAN 분주        예) d2  (2=50Hz)
@@ -97,9 +98,23 @@ int   CAN_DIV         = 2;       // 100Hz / 2 = 50Hz 전송
  *   MOTOR_KP : 강성. 클수록 목표를 세게 따라가지만 오버슛도 커진다.
  *   MOTOR_KD : 감쇠. 발진을 잡는 값. 0 이면 매뉴얼 경고대로 폭주한다.
  * 임계감쇠 근처는  Kd ≈ 2·√(Kp·J).  낮게 시작해 올려가며 찾는다.
+ *
+ * ⚠ MIT 모드에는 속도 제한이 없다.
+ *   위치/속도 모드의 v_des 는 "이 속도를 넘지 마라" 였지만, MIT 의 v_des 는
+ *   감쇠항의 기준 속도일 뿐이다. 목표가 튀면 그 오차에 Kp 를 곱한 토크가
+ *   그 자리에서 전부 나간다.
+ *
+ *       τ = Kp × 오차      (TMAX = 10 N·m 에서 포화)
+ *
+ *   Kp 20 에 0.5 rad 오차면 10 N·m — 최대 토크다. 실제로 이 조합으로
+ *   시험 구동을 돌렸다가 기구가 통째로 튕겼다.
+ *   각도 제한(25° = 0.44 rad)에서의 토크가 감당 가능한지 늘 확인할 것.
  */
-float MOTOR_KP = 20.0f;
-float MOTOR_KD = 1.0f;
+float MOTOR_KP = 3.0f;     // 0.44 rad 에서 약 1.3 N·m
+float MOTOR_KD = 0.5f;
+
+// Kp 를 바꿀 때 경고 기준으로 쓰는 토크 [N·m]
+const float TORQUE_WARN = 3.0f;
 
 // ── MIT 모드 변환 범위 — 드라이버 설정값과 반드시 일치해야 한다 ──
 const float P_MIN  = -12.5f, P_MAX  =  12.5f;   // rad      (PMAX 12.5)
@@ -372,9 +387,22 @@ void drainCAN() {
   }
 }
 
-/* CAN 경로만 확인하는 시험 구동. IMU·제어식을 거치지 않는다. */
+/* CAN 경로만 확인하는 시험 구동. IMU·제어식을 거치지 않는다.
+ *
+ * ⚠ MIT 모드에서는 목표를 계단처럼 주면 안 된다.
+ *   위치/속도 모드용 코드는 ±0.5 rad 을 한 번에 던지고 드라이버의 속도 제한에
+ *   맡겼는데, MIT 에는 그 제한이 없어 Kp×0.5 rad 이 즉시 토크로 나간다.
+ *   그래서 여기서는 목표를 삼각파로 서서히 올렸다 내린다.
+ */
 void motorSweep() {
-  Serial.println(">>> 시험 구동 6초 (±0.5 rad). 손을 치우세요.");
+  const float SWEEP_DEG  = 8.0f;    // 진폭 — 통신 확인에는 이 정도면 충분
+  const float SWEEP_RATE = 20.0f;   // 목표 이동 속도 [deg/s]
+
+  Serial.printf(">>> 시험 구동 8초 (±%.0f°, %.0f°/s 램프). 손을 치우세요.\n",
+                SWEEP_DEG, SWEEP_RATE);
+  Serial.printf("    Kp=%.1f Kd=%.2f  →  최대 약 %.2f N·m\n",
+                MOTOR_KP, MOTOR_KD, MOTOR_KP * SWEEP_DEG * DEG_TO_RAD);
+
   broadcastUniversal(0xFB);  delay(50);
   broadcastUniversal(0xFE);  delay(50);
   sendMIT(CAN_ID_PITCH, 0, 0, MOTOR_KP, MOTOR_KD, 0);
@@ -382,14 +410,30 @@ void motorSweep() {
   delay(50);
   broadcastUniversal(0xFC);  delay(100);
 
-  bool dir = true;
-  uint32_t t0 = millis(), last = 0;
-  while (millis() - t0 < 6000) {
-    if (millis() - last >= 500) { last = millis(); dir = !dir; }
-    float p = dir ? 0.5f : -0.5f;
-    sendMIT(CAN_ID_PITCH, p, 0, MOTOR_KP, MOTOR_KD, 0);
-    sendMIT(CAN_ID_ROLL,  p, 0, MOTOR_KP, MOTOR_KD, 0);
+  float p = 0;                       // 현재 목표 [deg] — 0 에서 출발
+  int   dir = +1;
+  uint32_t t0 = millis(), last = millis();
+
+  while (millis() - t0 < 8000) {
+    uint32_t now = millis();
+    float step = SWEEP_RATE * (now - last) * 0.001f;
+    last = now;
+
+    p += dir * step;
+    if (p >=  SWEEP_DEG) { p =  SWEEP_DEG; dir = -1; }
+    if (p <= -SWEEP_DEG) { p = -SWEEP_DEG; dir = +1; }
+
+    sendMIT(CAN_ID_PITCH, p * DEG_TO_RAD, 0, MOTOR_KP, MOTOR_KD, 0);
+    sendMIT(CAN_ID_ROLL,  p * DEG_TO_RAD, 0, MOTOR_KP, MOTOR_KD, 0);
     drainCAN();
+    delay(20);
+  }
+
+  // 원위치로 되돌린 뒤 정지 — 기울어진 채로 disable 되지 않게
+  while (fabsf(p) > 0.5f) {
+    p += (p > 0 ? -0.4f : 0.4f);
+    sendMIT(CAN_ID_PITCH, p * DEG_TO_RAD, 0, MOTOR_KP, MOTOR_KD, 0);
+    sendMIT(CAN_ID_ROLL,  p * DEG_TO_RAD, 0, MOTOR_KP, MOTOR_KD, 0);
     delay(20);
   }
   broadcastUniversal(0xFD);
@@ -420,7 +464,14 @@ void handleSerial() {
     float v = s.substring(2).toFloat();
     if (v >= KP_MIN && v <= KP_MAX) {
       MOTOR_KP = v;
-      Serial.printf(">>> Kp = %.1f N/rad\n", MOTOR_KP);
+      // MIT 는 속도 제한이 없다. 각도 제한까지 벌어졌을 때의 토크를 알려준다.
+      float tmax = MOTOR_KP * LIMIT_DEG * DEG_TO_RAD;
+      Serial.printf(">>> Kp = %.1f N/rad  (%.0f° 오차에서 %.2f N·m)\n",
+                    MOTOR_KP, LIMIT_DEG, tmax);
+      if (tmax > TORQUE_WARN) {
+        Serial.printf("   !! %.1f N·m 초과 — 목표가 튀면 그만큼 그대로 나갑니다\n",
+                      TORQUE_WARN);
+      }
     } else Serial.printf("!! Kp 범위 %.0f ~ %.0f\n", KP_MIN, KP_MAX);
   } else if (u.startsWith("kd")) {
     float v = s.substring(2).toFloat();
@@ -513,7 +564,7 @@ void setup() {
   Serial.println("  arm     활성화        stop  비활성화");
   Serial.println("  t       시험 구동     z     영점 재설정");
   Serial.println("  g<값>   제어 게인     예) g0.5");
-  Serial.println("  kp<값>  모터 강성     예) kp30   [0~500]");
+  Serial.println("  kp<값>  모터 강성     예) kp5    [0~500]  낮게 시작할 것");
   Serial.println("  kd<값>  모터 감쇠     예) kd1.5  [0~5]  ← 발진 잡는 값");
   Serial.println("  f<값>   지령 필터     d<값>  CAN 분주");
   Serial.println("  q       출력 on/off   ?      상태 출력");

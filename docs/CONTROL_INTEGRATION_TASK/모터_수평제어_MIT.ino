@@ -110,11 +110,26 @@ int   CAN_DIV         = 2;       // 100Hz / 2 = 50Hz 전송
  *   시험 구동을 돌렸다가 기구가 통째로 튕겼다.
  *   각도 제한(25° = 0.44 rad)에서의 토크가 감당 가능한지 늘 확인할 것.
  */
-float MOTOR_KP = 3.0f;     // 0.44 rad 에서 약 1.3 N·m
+float MOTOR_KP = 1.0f;     // 0.44 rad 에서 약 0.44 N·m — 아주 낮게 시작
 float MOTOR_KD = 0.5f;
 
 // Kp 를 바꿀 때 경고 기준으로 쓰는 토크 [N·m]
 const float TORQUE_WARN = 3.0f;
+
+/* ── 폭주 차단 ──────────────────────────────────────────────────────────
+ * 지령은 ±LIMIT_DEG(25°) 를 넘지 않으므로 실제 위치가 이 값을 넘으면
+ * 우리가 시킨 움직임이 아니다. 즉시 disable 한다.
+ *
+ * 주소 충돌로 모터가 3바퀴(1080°) 도는 동안 코드가 아무것도 하지 않았다.
+ * 이 검사가 있었다면 50° 에서 멈췄다.
+ */
+const float ACT_LIMIT_DEG = 50.0f;
+
+/* 피드백이 이 시간 이상 끊기면 실제 위치를 알 수 없으므로 정지한다.
+ * 위 검사가 낡은 값을 보고 통과해버리는 것을 막는다.
+ */
+const uint32_t FB_TIMEOUT_MS = 300;
+unsigned long lastFb = 0;
 
 // ── MIT 모드 변환 범위 — 드라이버 설정값과 반드시 일치해야 한다 ──
 const float P_MIN  = -12.5f, P_MAX  =  12.5f;   // rad      (PMAX 12.5)
@@ -324,6 +339,7 @@ void motorsArm() {
   delay(50);
 
   broadcastUniversal(0xFC);  delay(100);  // enable
+  lastFb = millis();                      // 피드백 타임아웃 기준점
   armed = true;
   Serial.printf(">>> ARMED  GAIN=%.2f  Kp=%.1f  Kd=%.2f  제한 ±%.0f°\n",
                 GAIN, MOTOR_KP, MOTOR_KD, LIMIT_DEG);
@@ -379,11 +395,30 @@ void drainCAN() {
 
     last_status[i] = st;
     fb_count++;
+    lastFb = millis();
 
     if (st >= ST_FAULT_MIN && armed) {
       Serial.printf("!! 모터 %u 이상 — %s\n", mid, statusName(st));
       motorsDisarm("모터 이상");
     }
+  }
+
+  if (!armed) return;
+
+  // 실제 위치가 지령 범위를 크게 벗어나면 우리가 시킨 게 아니다
+  float ap = act_deg[CAN_ID_PITCH & 0x03];
+  float ar = act_deg[CAN_ID_ROLL  & 0x03];
+  if (fabsf(ap) > ACT_LIMIT_DEG || fabsf(ar) > ACT_LIMIT_DEG) {
+    Serial.printf("!! 폭주 차단 — 실제 위치 P=%.1f° R=%.1f° (한계 ±%.0f°)\n",
+                  ap, ar, ACT_LIMIT_DEG);
+    motorsDisarm("위치 한계 초과");
+    return;
+  }
+
+  // 피드백이 끊기면 위 검사가 낡은 값을 보게 되므로 함께 정지
+  if (lastFb != 0 && millis() - lastFb > FB_TIMEOUT_MS) {
+    Serial.printf("!! 피드백 %lums 끊김\n", millis() - lastFb);
+    motorsDisarm("피드백 두절");
   }
 }
 

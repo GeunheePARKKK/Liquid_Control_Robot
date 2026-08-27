@@ -38,8 +38,11 @@
  * 시리얼 명령 (115200)
  *   arm       모터 활성화 (트레이를 중립, 차체를 수평에 두고 실행할 것)
  *   stop      모터 비활성화
+ *   t         시험 구동 — CAN 경로만 확인 (IMU·제어식 무관)
  *   z         현재 위치를 모터 영점으로 재설정
- *   g<값>     제어 게인 변경   예) g0.5
+ *   g<값>     제어 게인      예) g0.5
+ *   v<값>     속도 제한      예) v0.3   [rad/s]
+ *   f<값>     지령 필터      예) f0.1   (작을수록 부드러움)
  *   ?         현재 상태 출력
  * -----------------------------------------------------------------------------
  */
@@ -80,8 +83,16 @@ float DIR_ROLL  = +1.0f;
 // ── 제어 파라미터 ──
 float GAIN            = 0.3f;    // 0.3 부터 시작해 1.0 까지 올린다
 const float LIMIT_DEG = 25.0f;   // 모터 각도 제한
-const float MAX_RATE  = 60.0f;   // 슬루 제한 [deg/s]
-const float VEL_LIMIT = 2.0f;    // 모터 속도 제한 [rad/s]
+float MAX_RATE        = 30.0f;   // 슬루 제한 [deg/s]
+float VEL_LIMIT       = 0.5f;    // 모터 속도 제한 [rad/s] — 시운전용. 안정되면 올린다
+
+/* 지령 저역통과 필터.  0 에 가까울수록 부드럽고 느리다.
+ *
+ * IMU 를 손에 들고 시험하는 동안에는 손 떨림(실측 약 9.6°)이 그대로 지령에
+ * 실려 모터가 계속 떤다. 차체에 고정하면 크게 줄어들 값이므로, 실장 후에는
+ * 응답을 되찾기 위해 이 값을 올릴 것.
+ */
+float CMD_LPF = 0.15f;
 
 // ── LSM6DSOX 레지스터 ──
 #define REG_WHO_AM_I   0x0F
@@ -244,9 +255,18 @@ void motorsArm() {
   Serial.println(">>> arm: 트레이 중립 / 차체 수평 상태여야 합니다");
   broadcastUniversal(0xFB);  delay(50);   // 에러 해제
   broadcastUniversal(0xFE);  delay(50);   // 현재 위치를 영점으로
+
+  /* enable 전에 목표를 현재 위치(0)로 먼저 박아둔다.
+   * 이걸 빼면 드라이버가 마지막으로 기억하던 목표로 확 달려간다.
+   * 시험 구동(t) 직후라면 그 값이 ±0.5 rad = ±28° 라 크게 튄다.
+   */
+  sendPosVel(CAN_ID_PITCH, 0.0f, VEL_LIMIT);
+  sendPosVel(CAN_ID_ROLL,  0.0f, VEL_LIMIT);
+  delay(50);
+
   broadcastUniversal(0xFC);  delay(100);  // enable
 
-  cmd_pitch = 0;  cmd_roll = 0;           // 슬루 기준점 초기화
+  cmd_pitch = 0;  cmd_roll = 0;           // 슬루/필터 기준점 초기화
   armed = true;
   Serial.printf(">>> ARMED  (GAIN=%.2f, 제한 ±%.0f°)\n", GAIN, LIMIT_DEG);
 }
@@ -339,13 +359,29 @@ void handleSerial() {
     } else {
       Serial.println("!! GAIN 범위 0.0 ~ 1.5");
     }
+  } else if (s.startsWith("v") || s.startsWith("V")) {
+    float v = s.substring(1).toFloat();
+    if (v > 0.0f && v <= 20.0f) {
+      VEL_LIMIT = v;
+      Serial.printf(">>> VEL_LIMIT = %.2f rad/s\n", VEL_LIMIT);
+    } else {
+      Serial.println("!! VEL_LIMIT 범위 0 ~ 20");
+    }
+  } else if (s.startsWith("f") || s.startsWith("F")) {
+    float v = s.substring(1).toFloat();
+    if (v > 0.0f && v <= 1.0f) {
+      CMD_LPF = v;
+      Serial.printf(">>> CMD_LPF = %.2f\n", CMD_LPF);
+    } else {
+      Serial.println("!! CMD_LPF 범위 0 ~ 1");
+    }
   } else if (s.equalsIgnoreCase("t")) {
     motorsDisarm("시험 구동 진입");
     motorSweep();
   } else if (s == "?") {
     printStatus();
   } else {
-    Serial.println("명령: arm / stop / z / t / g<값> / ?");
+    Serial.println("명령: arm / stop / z / t / g<값> / v<값> / f<값> / ?");
   }
 }
 
@@ -415,7 +451,9 @@ void setup() {
   Serial.println("  stop   비활성화");
   Serial.println("  t      시험 구동 — CAN 경로만 확인 (IMU 무관)");
   Serial.println("  z      모터 영점 재설정");
-  Serial.println("  g<값>  게인 변경   예) g0.5");
+  Serial.println("  g<값>  게인 변경     예) g0.5");
+  Serial.println("  v<값>  속도 제한     예) v0.3  [rad/s]");
+  Serial.println("  f<값>  지령 필터     예) f0.1  (작을수록 부드러움)");
   Serial.println("  ?      상태 출력");
   Serial.println("==================================================\n");
 }
@@ -427,8 +465,16 @@ void setup() {
 void loop() {
   handleSerial();
 
-  if ((long)(micros() - lastLoop) < 10000) return;   // 100Hz
-  lastLoop += 10000;
+  /* 100Hz 주기.
+   * 누적(+=) 방식은 dt 오차가 없지만, 오래 걸리는 작업(시험 구동 6초,
+   * configSensor 150ms) 뒤에는 밀린 만큼을 한꺼번에 몰아서 실행한다.
+   * 6초 밀리면 600회가 순식간에 돌며 자이로를 6초치 적분하고 CAN 을
+   * 수백 프레임 쏟아낸다. 크게 밀렸으면 누적을 포기하고 재동기한다.
+   */
+  long behind = (long)(micros() - lastLoop);
+  if (behind < 10000) return;
+  if (behind > 100000) lastLoop = micros();          // 0.1초 이상 밀림 → 재동기
+  else                 lastLoop += 10000;
 
   // ─────────────────────────────────────────────────────────────────
   //  1. 자세 추정  (IMU_Reading.ino 와 동일)
@@ -506,10 +552,15 @@ void loop() {
   want_pitch = constrain(want_pitch, -LIMIT_DEG, LIMIT_DEG);
   want_roll  = constrain(want_roll,  -LIMIT_DEG, LIMIT_DEG);
 
+  // 저역통과 — 손 떨림 등 고주파 성분 제거
+  static float lpf_pitch = 0, lpf_roll = 0;
+  lpf_pitch = CMD_LPF * want_pitch + (1.0f - CMD_LPF) * lpf_pitch;
+  lpf_roll  = CMD_LPF * want_roll  + (1.0f - CMD_LPF) * lpf_roll;
+
   // 슬루 제한 — 한 주기당 최대 변화량
   const float maxStep = MAX_RATE * dt;
-  cmd_pitch = slew(want_pitch, cmd_pitch, maxStep);
-  cmd_roll  = slew(want_roll,  cmd_roll,  maxStep);
+  cmd_pitch = slew(lpf_pitch, cmd_pitch, maxStep);
+  cmd_roll  = slew(lpf_roll,  cmd_roll,  maxStep);
 
   if (armed) {
     sendPosVel(CAN_ID_PITCH, cmd_pitch * DEG_TO_RAD, VEL_LIMIT);

@@ -110,6 +110,28 @@ const float ACC_MAG_DEAD      = 0.05;
  */
 const uint16_t REJ_RUN_FAULT = 100;
 
+/* 모터 피드백 data[0] 상위니블은 오류코드가 아니라 상태코드다.
+ *   0 = Disable, 1 = Enable  ← 정상
+ *   8 이상       = 이상 (과전압/저전압/과전류/과열/통신끊김/과부하)
+ * hardware/MOTOR_HANDOFF.md 참고.
+ */
+const uint8_t ST_FAULT_MIN = 0x8;
+
+const char* statusName(uint8_t st) {
+  switch (st) {
+    case 0x0: return "Disable";
+    case 0x1: return "Enable";
+    case 0x8: return "과전압";
+    case 0x9: return "저전압";
+    case 0xA: return "과전류";
+    case 0xB: return "MOS과열";
+    case 0xC: return "권선과열";
+    case 0xD: return "통신끊김";
+    case 0xE: return "과부하";
+    default:  return "미정의";
+  }
+}
+
 // =============================================================================
 //  상태 변수
 // =============================================================================
@@ -122,6 +144,9 @@ float cmd_pitch = 0, cmd_roll = 0;      // 실제로 내보낸 모터 지령 [de
 bool  armed      = false;
 bool  imu_ok     = false;
 uint16_t rej_run = 0;
+
+uint8_t  last_status[4] = {0xFF, 0xFF, 0xFF, 0xFF};   // 모터별 최근 상태코드
+uint32_t fb_count = 0;                                 // 피드백 수신 횟수
 
 unsigned long lastLoop = 0, lastPrint = 0, lastCheck = 0;
 uint32_t n_win = 0, err_win = 0, err_reset = 0;
@@ -246,11 +271,50 @@ float slew(float target, float prev, float maxStep) {
 }
 
 void printStatus() {
-  Serial.printf("[상태] %s  GAIN=%.2f  DIR(p/r)=%+.0f/%+.0f  "
-                "pitch=%.2f roll=%.2f  cmd(p/r)=%.2f/%.2f  IMU=%s\n",
+  Serial.printf("[상태] %s  GAIN=%.2f  DIR(p/r)=%+.0f/%+.0f  IMU=%s\n",
                 armed ? "ARMED" : "STOP", GAIN, DIR_PITCH, DIR_ROLL,
-                pitch_filtered, roll_filtered, cmd_pitch, cmd_roll,
                 imu_ok ? "OK" : "FAULT");
+  Serial.printf("       pitch=%.2f roll=%.2f  cmd(p/r)=%.2f/%.2f\n",
+                pitch_filtered, roll_filtered, cmd_pitch, cmd_roll);
+  Serial.printf("       모터 피드백 %lu회  P(id%u)=%s  R(id%u)=%s\n",
+                fb_count,
+                CAN_ID_PITCH, statusName(last_status[CAN_ID_PITCH & 0x03]),
+                CAN_ID_ROLL,  statusName(last_status[CAN_ID_ROLL  & 0x03]));
+  if (fb_count == 0) {
+    Serial.println("       !! 피드백 0회 — CAN 배선/종단저항/모터 전원 확인");
+  }
+}
+
+/* CAN 경로만 따로 확인하는 시험 구동.
+ * motor_test.ino 와 동일하게 ±0.5 rad 을 왕복시킨다. IMU 와 제어식을 거치지
+ * 않으므로, 이게 움직이면 CAN 은 정상이고 문제는 제어 쪽에 있다는 뜻이다.
+ */
+void motorSweep() {
+  Serial.println(">>> 시험 구동 6초 (±0.5 rad). 손을 치우세요.");
+  broadcastUniversal(0xFB);  delay(50);
+  broadcastUniversal(0xFE);  delay(50);
+  broadcastUniversal(0xFC);  delay(100);
+
+  bool dir = true;
+  uint32_t t0 = millis(), last = 0;
+  while (millis() - t0 < 6000) {
+    if (millis() - last >= 500) { last = millis(); dir = !dir; }
+    sendPosVel(CAN_ID_PITCH, dir ? 0.5f : -0.5f, 1.0f);
+    sendPosVel(CAN_ID_ROLL,  dir ? 0.5f : -0.5f, 1.0f);
+
+    twai_message_t rx;
+    while (twai_receive(&rx, 0) == ESP_OK) {
+      uint8_t mid = rx.data[0] & 0x0F;
+      uint8_t st  = rx.data[0] >> 4;
+      last_status[mid & 0x03] = st;
+      fb_count++;
+    }
+    delay(20);
+  }
+  broadcastUniversal(0xFD);
+  Serial.printf(">>> 시험 종료. 피드백 %lu회  P=%s  R=%s\n", fb_count,
+                statusName(last_status[CAN_ID_PITCH & 0x03]),
+                statusName(last_status[CAN_ID_ROLL  & 0x03]));
 }
 
 void handleSerial() {
@@ -275,10 +339,13 @@ void handleSerial() {
     } else {
       Serial.println("!! GAIN 범위 0.0 ~ 1.5");
     }
+  } else if (s.equalsIgnoreCase("t")) {
+    motorsDisarm("시험 구동 진입");
+    motorSweep();
   } else if (s == "?") {
     printStatus();
   } else {
-    Serial.println("명령: arm / stop / z / g<값> / ?");
+    Serial.println("명령: arm / stop / z / t / g<값> / ?");
   }
 }
 
@@ -341,8 +408,16 @@ void setup() {
   broadcastUniversal(0xFD);        // 부팅 시에는 비활성 상태로 둔다
 
   lastLoop = micros();
-  Serial.println("\n준비 완료. 모터는 아직 비활성입니다.");
-  Serial.println("명령: arm / stop / z / g<값> / ?\n");
+  Serial.println("\n==================================================");
+  Serial.println(" 모터는 비활성 상태입니다. 'arm' 을 입력해야 움직입니다.");
+  Serial.println("--------------------------------------------------");
+  Serial.println("  arm    모터 활성화 (차체 수평 / 트레이 중립에서)");
+  Serial.println("  stop   비활성화");
+  Serial.println("  t      시험 구동 — CAN 경로만 확인 (IMU 무관)");
+  Serial.println("  z      모터 영점 재설정");
+  Serial.println("  g<값>  게인 변경   예) g0.5");
+  Serial.println("  ?      상태 출력");
+  Serial.println("==================================================\n");
 }
 
 
@@ -407,10 +482,14 @@ void loop() {
   twai_message_t rx;
   while (twai_receive(&rx, 0) == ESP_OK) {
     uint8_t mid = rx.data[0] & 0x0F;
-    uint8_t err = rx.data[0] >> 4;
-    if (err != 0 && armed) {
-      Serial.printf("!! 모터 %u 오류코드 %X\n", mid, err);
-      motorsDisarm("모터 오류");
+    uint8_t st  = rx.data[0] >> 4;      // 상태코드 (오류코드가 아님)
+
+    last_status[mid & 0x03] = st;
+    fb_count++;
+
+    if (st >= ST_FAULT_MIN && armed) {
+      Serial.printf("!! 모터 %u 이상 — %s\n", mid, statusName(st));
+      motorsDisarm("모터 이상");
     }
   }
 
@@ -455,8 +534,11 @@ void loop() {
       configSensor();
       motorsDisarm("센서 리셋");
     }
-    Serial.printf("[stat] %s reset:%lu 무보정:%lu/%lu |a|=%.2f trust=%.2f\n",
-                  armed ? "ARMED" : "STOP", err_reset, err_win, n_win, a_mag, trust);
+    Serial.printf("[stat] %s 모터P=%s R=%s 피드백:%lu | reset:%lu 무보정:%lu/%lu trust=%.2f\n",
+                  armed ? "ARMED" : "STOP",
+                  statusName(last_status[CAN_ID_PITCH & 0x03]),
+                  statusName(last_status[CAN_ID_ROLL  & 0x03]),
+                  fb_count, err_reset, err_win, n_win, trust);
     n_win = 0;  err_win = 0;
   }
 }

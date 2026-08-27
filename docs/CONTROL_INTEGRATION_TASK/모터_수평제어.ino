@@ -94,6 +94,13 @@ float VEL_LIMIT       = 0.5f;    // 모터 속도 제한 [rad/s] — 시운전�
  */
 float CMD_LPF = 0.15f;
 
+/* CAN 전송 분주.  제어는 100Hz 로 돌지만 모터로는 이 배수마다 한 번만 보낸다.
+ * 위치/속도 모드 드라이버는 프레임을 받을 때마다 내부 궤적을 새로 시작할 수
+ * 있어, 같은 목표를 100Hz 로 재전송하면 계속 재시작하며 떨 수 있다.
+ * 2 = 50Hz — motor_test.ino 에서 문제없이 동작한 주기.
+ */
+int CAN_DIV = 2;
+
 // ── LSM6DSOX 레지스터 ──
 #define REG_WHO_AM_I   0x0F
 #define REG_CTRL1_XL   0x10
@@ -157,6 +164,7 @@ bool  imu_ok     = false;
 uint16_t rej_run = 0;
 
 uint8_t  last_status[4] = {0xFF, 0xFF, 0xFF, 0xFF};   // 모터별 최근 상태코드
+float    act_deg[4]     = {0, 0, 0, 0};                // 모터별 실제 위치 [deg]
 uint32_t fb_count = 0;                                 // 피드백 수신 횟수
 
 unsigned long lastLoop = 0, lastPrint = 0, lastCheck = 0;
@@ -375,13 +383,21 @@ void handleSerial() {
     } else {
       Serial.println("!! CMD_LPF 범위 0 ~ 1");
     }
+  } else if (s.startsWith("d") || s.startsWith("D")) {
+    int v = s.substring(1).toInt();
+    if (v >= 1 && v <= 20) {
+      CAN_DIV = v;
+      Serial.printf(">>> CAN_DIV = %d  (%dHz 전송)\n", CAN_DIV, 100 / CAN_DIV);
+    } else {
+      Serial.println("!! CAN_DIV 범위 1 ~ 20");
+    }
   } else if (s.equalsIgnoreCase("t")) {
     motorsDisarm("시험 구동 진입");
     motorSweep();
   } else if (s == "?") {
     printStatus();
   } else {
-    Serial.println("명령: arm / stop / z / t / g<값> / v<값> / f<값> / ?");
+    Serial.println("명령: arm / stop / z / t / g<값> / v<값> / f<값> / d<값> / ?");
   }
 }
 
@@ -454,6 +470,7 @@ void setup() {
   Serial.println("  g<값>  게인 변경     예) g0.5");
   Serial.println("  v<값>  속도 제한     예) v0.3  [rad/s]");
   Serial.println("  f<값>  지령 필터     예) f0.1  (작을수록 부드러움)");
+  Serial.println("  d<값>  CAN 분주      예) d2    (2=50Hz, 4=25Hz)");
   Serial.println("  ?      상태 출력");
   Serial.println("==================================================\n");
 }
@@ -530,6 +547,10 @@ void loop() {
     uint8_t mid = rx.data[0] & 0x0F;
     uint8_t st  = rx.data[0] >> 4;      // 상태코드 (오류코드가 아님)
 
+    // 실제 위치: 16bit → raw*25/65535 - 12.5 [rad]  (MOTOR_HANDOFF.md)
+    uint16_t praw = ((uint16_t)rx.data[1] << 8) | rx.data[2];
+    act_deg[mid & 0x03] = ((float)praw * 25.0f / 65535.0f - 12.5f) * RAD_TO_DEG;
+
     last_status[mid & 0x03] = st;
     fb_count++;
 
@@ -562,7 +583,9 @@ void loop() {
   cmd_pitch = slew(lpf_pitch, cmd_pitch, maxStep);
   cmd_roll  = slew(lpf_roll,  cmd_roll,  maxStep);
 
-  if (armed) {
+  static int div_cnt = 0;
+  if (armed && (++div_cnt >= CAN_DIV)) {
+    div_cnt = 0;
     sendPosVel(CAN_ID_PITCH, cmd_pitch * DEG_TO_RAD, VEL_LIMIT);
     sendPosVel(CAN_ID_ROLL,  cmd_roll  * DEG_TO_RAD, VEL_LIMIT);
   }
@@ -570,10 +593,13 @@ void loop() {
   // ─────────────────────────────────────────────────────────────────
   //  4. 출력
   // ─────────────────────────────────────────────────────────────────
-  if (millis() - lastPrint > 100) {         // 10Hz
+  if (millis() - lastPrint > 20) {          // 50Hz — 진동 관찰용
     lastPrint = millis();
-    Serial.printf("pitch:%.2f,cmd_pitch:%.2f,roll:%.2f,cmd_roll:%.2f\n",
-                  pitch_filtered, cmd_pitch, roll_filtered, cmd_roll);
+    // act_* = 모터가 보고한 실제 위치. cmd 와 비교하면 추종 상태가 보인다.
+    Serial.printf("pitch:%.2f,cmd_pitch:%.2f,act_pitch:%.2f,"
+                  "roll:%.2f,cmd_roll:%.2f,act_roll:%.2f\n",
+                  pitch_filtered, cmd_pitch, act_deg[CAN_ID_PITCH & 0x03],
+                  roll_filtered,  cmd_roll,  act_deg[CAN_ID_ROLL  & 0x03]);
   }
 
   if (millis() - lastCheck > 2000) {        // 2초

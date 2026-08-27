@@ -47,6 +47,7 @@
  *   kd<값>    모터 감쇠       예) kd1.5   [N·s/rad] 0~5   ← 발진 잡는 값
  *   f<값>     지령 필터       예) f0.1
  *   d<값>     CAN 분주        예) d2  (2=50Hz)
+ *   q         50Hz 출력 on/off (타이핑할 때 끄면 편함)
  *   ?         상태 출력
  * -----------------------------------------------------------------------------
  */
@@ -159,6 +160,7 @@ float cmd_pitch = 0, cmd_roll = 0;      // 내보낸 지령 [deg]
 
 bool  armed  = false;
 bool  imu_ok = false;
+bool  stream = true;              // 50Hz 스트림 출력 on/off  (q 로 토글)
 uint16_t rej_run = 0;
 
 uint8_t  last_status[4] = {0xFF, 0xFF, 0xFF, 0xFF};
@@ -439,10 +441,13 @@ void handleSerial() {
     int v = s.substring(1).toInt();
     if (v >= 1 && v <= 20) { CAN_DIV = v; Serial.printf(">>> CAN_DIV = %d (%dHz)\n", v, 100 / v); }
     else Serial.println("!! CAN_DIV 범위 1 ~ 20");
+  } else if (u == "q") {
+    stream = !stream;
+    Serial.printf(">>> 스트림 출력 %s\n", stream ? "ON" : "OFF (타이핑하기 편해집니다)");
   } else if (u == "?") {
     printStatus();
   } else {
-    Serial.println("명령: arm / stop / z / t / g / kp / kd / f / d / ?");
+    Serial.println("명령: arm / stop / z / t / q / g / kp / kd / f / d / ?");
   }
 }
 
@@ -510,7 +515,8 @@ void setup() {
   Serial.println("  g<값>   제어 게인     예) g0.5");
   Serial.println("  kp<값>  모터 강성     예) kp30   [0~500]");
   Serial.println("  kd<값>  모터 감쇠     예) kd1.5  [0~5]  ← 발진 잡는 값");
-  Serial.println("  f<값>   지령 필터     d<값>  CAN 분주     ?  상태");
+  Serial.println("  f<값>   지령 필터     d<값>  CAN 분주");
+  Serial.println("  q       출력 on/off   ?      상태 출력");
   Serial.println("==================================================\n");
 }
 
@@ -586,7 +592,7 @@ void loop() {
   }
 
   // ── 4. 출력 ──
-  if (millis() - lastPrint > 20) {          // 50Hz — 진동 관찰용
+  if (stream && millis() - lastPrint > 20) {   // 50Hz — 진동 관찰용
     lastPrint = millis();
     Serial.printf("pitch:%.2f,cmd_pitch:%.2f,act_pitch:%.2f,"
                   "roll:%.2f,cmd_roll:%.2f,act_roll:%.2f\n",

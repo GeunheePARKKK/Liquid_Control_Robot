@@ -46,7 +46,8 @@
  *   d    disable
  *   z    현재 위치를 영점으로
  *   c    카운터 초기화
- *   p<값> Kp 설정 (상한 5)    i<값> Kd 설정 (상한 1)    0  둘 다 0 으로
+ *   kp<값>  Kp 설정 (상한 5)    kd<값>  Kd 설정 (상한 1)    0  둘 다 0 으로
+ *           MIT 에는 적분항(Ki)이 없다. kd 는 감쇠항이다.
  * -----------------------------------------------------------------------------
  */
 
@@ -220,17 +221,18 @@ void handleSerial() {
   } else if (s == "0") {
     probe_kp = 0;  probe_kd = 0;
     Serial.println(">>> 게인 0 — 무동력으로 복귀");
-  } else if (s.startsWith("p")) {
-    float v = s.substring(1).toFloat();
+  } else if (s.startsWith("kp")) {          // kd 보다 먼저 검사
+    float v = s.substring(2).toFloat();
     probe_kp = constrain(v, 0.0f, PROBE_KP_MAX);
     Serial.printf(">>> Kp = %.2f  (상한 %.1f)  25°에서 %.2f N·m\n",
                   probe_kp, PROBE_KP_MAX, probe_kp * 25.0f * DEG_TO_RAD);
-  } else if (s.startsWith("i")) {
-    float v = s.substring(1).toFloat();
+  } else if (s.startsWith("kd")) {
+    float v = s.substring(2).toFloat();
     probe_kd = constrain(v, 0.0f, PROBE_KD_MAX);
-    Serial.printf(">>> Kd = %.2f  (상한 %.1f)\n", probe_kd, PROBE_KD_MAX);
+    Serial.printf(">>> Kd = %.2f  (상한 %.1f)  — 감쇠항. 적분(Ki)은 MIT 에 없다\n",
+                  probe_kd, PROBE_KD_MAX);
   } else {
-    Serial.println("명령: e/d(enable·disable) z(영점) c(카운터) 0(게인0) p<값>(Kp) i<값>(Kd)");
+    Serial.println("명령: e/d(enable·disable) z(영점) c(카운터) 0(게인0) kp<값> kd<값>");
   }
 }
 
@@ -256,7 +258,7 @@ void setup() {
   Serial.println("--------------------------------------------------");
   Serial.println("  e  enable            d  disable");
   Serial.println("  z  영점 재설정        c  카운터 초기화");
-  Serial.println("  p<값>  Kp (상한 5)   i<값>  Kd (상한 1)   0  게인 0");
+  Serial.println("  kp<값> Kp (상한 5)   kd<값> Kd (상한 1)   0  게인 0");
   Serial.println("==================================================\n");
 }
 
@@ -320,12 +322,12 @@ void loop() {
  *
  *   ① z 로 영점을 잡는다 (오차 0 에서 시작하도록)
  *   ② e 로 enable    — 아직 게인 0 이라 조용해야 한다
- *   ③ i0.5           — Kd 만 준다.  소리?
- *   ④ 0 으로 되돌리고  p1   — Kp 만 준다.  소리?
- *   ⑤ p1 i0.5        — 둘 다.  소리?
+ *   ③ kd0.5          — Kd 만 준다.  소리?
+ *   ④ 0 으로 되돌리고  kp1  — Kp 만 준다.  소리?
+ *   ⑤ kp1 kd0.5      — 둘 다.  소리?
  *
  *   Kd 만 줬을 때 남   → 엔코더 속도 노이즈에 Kd 가 반응하는 것.  Kd 를 낮춘다
- *   Kp 만 줬을 때 남   → 스틱슬립.  Kp 를 오히려 올려야 한다 (p3, p5)
+ *   Kp 만 줬을 때 남   → 스틱슬립.  Kp 를 오히려 올려야 한다 (kp3, kp5)
  *   둘 다일 때만 남    → 스틱슬립 확정.  Kp 를 올리고 Kd 는 낮춘다
  *   어느 쪽도 조용     → 제어 스케치 쪽 문제.  다시 본다
  *

@@ -668,31 +668,11 @@ void loop() {
   if (trust <= 0.0f) { err_win++; rej_run++; } else rej_run = 0;
 
   // ── 2. 이상 감지 ──
-  /* 센서 파워다운 감지 및 복구.
-   *
-   * 재시도를 1초에 한 번으로 제한한다. configSensor() 안에 delay 가 150ms 있어
-   * 매 루프 부르면 시리얼 입력조차 안 먹는 상태가 된다. 접촉 불량으로 센서가
-   * 계속 끊기는 동안에도 arm / stop 은 칠 수 있어야 한다.
-   *
-   * 복구돼도 자동으로 재-arm 하지는 않는다. 센서가 잠깐 깨졌다고 모터가 저절로
-   * 다시 켜지면 위험하다. 대신 복구 사실을 알려서 바로 arm 할 수 있게 한다.
-   */
-  static unsigned long lastRecover = 0;
-  if (a_mag < ACC_MAG_DEAD && millis() - lastRecover > 1000) {
-    lastRecover = millis();
-    if (readReg(REG_CTRL1_XL) != CTRL1_XL_VAL) {
-      err_reset++;
-      if (armed) motorsDisarm("센서 파워다운");
-      configSensor();
-      uint8_t id = readReg(REG_WHO_AM_I);
-      if (id == WHO_AM_I_VAL) {
-        imu_ok = true;  rej_run = 0;
-        Serial.println(">>> 센서 복구됨 — arm 을 다시 입력하면 재개합니다");
-      } else {
-        Serial.printf("!! 센서 응답 0x%02X — IMU VIN/GND 접촉 확인 (%lu회째)\n",
-                      id, err_reset);
-      }
-    }
+  if (a_mag < ACC_MAG_DEAD && readReg(REG_CTRL1_XL) != CTRL1_XL_VAL) {
+    err_reset++;
+    Serial.println("!! 센서 파워다운 감지 — 즉시 재설정");
+    configSensor();
+    motorsDisarm("센서 리셋");
   }
   if (rej_run > REJ_RUN_FAULT) {
     imu_ok = false;

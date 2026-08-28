@@ -44,6 +44,7 @@
  *   d    disable
  *   z    현재 위치를 영점으로
  *   c    카운터 초기화
+ *   p<값> Kp 설정 (상한 5)    i<값> Kd 설정 (상한 1)    0  둘 다 0 으로
  * -----------------------------------------------------------------------------
  */
 
@@ -62,6 +63,23 @@ const float V_MIN  = -30.0f, V_MAX  =  30.0f;   // VMAX 30
 const float KP_MIN =   0.0f, KP_MAX = 500.0f;
 const float KD_MIN =   0.0f, KD_MAX =   5.0f;
 const float T_MIN  = -10.0f, T_MAX  =  10.0f;
+
+/* ── 게인 탐침 ────────────────────────────────────────────────────────────
+ * 기본은 0 이라 무동력이다. p/i 명령으로만 아주 조금 올릴 수 있고,
+ * 아래 상한을 코드에 박아두어 그 이상은 입력해도 들어가지 않는다.
+ *
+ *   PROBE_KP_MAX 5  →  25° 오차에서 약 2.2 N·m (TMAX 10 의 1/5)
+ *   PROBE_KD_MAX 1
+ *
+ * 목적은 제어가 아니라 "그그극" 소리의 원인이 Kp 인지 Kd 인지 가려내는 것.
+ * 목표 위치는 항상 영점(0) 이므로, z 를 눌러 현재 자리를 영점으로 잡으면
+ * 오차가 0 에서 시작해 토크도 0 에서 시작한다.
+ */
+const float PROBE_KP_MAX = 5.0f;
+const float PROBE_KD_MAX = 1.0f;
+
+float probe_kp = 0.0f;
+float probe_kd = 0.0f;
 
 struct MotorInfo {
   uint32_t frames  = 0;       // 받은 피드백 수
@@ -105,16 +123,16 @@ float uint_to_float(uint16_t xi, float xmin, float xmax, uint8_t bits) {
   return ((float)xi) * span / ((float)((1UL << bits) - 1)) + xmin;
 }
 
-/* 무동력 MIT 프레임.
- * Kp / Kd / t_ff 는 인자로 받지 않는다 — 실수로라도 토크가 나갈 수 없게.
- * p_des 와 v_des 도 0 이지만, Kp=Kd=0 이므로 어떤 값이든 토크는 0 이다.
+/* MIT 프레임.  목표는 항상 영점(0), t_ff 는 항상 0.
+ * 게인은 probe_kp / probe_kd 만 쓰며 상한이 코드에 박혀 있다.
+ * 둘 다 0 이면 토크가 0 이라 손으로 자유롭게 돌아간다.
  */
 void sendLimp(uint8_t id) {
   uint16_t p  = float_to_uint(0.0f, P_MIN,  P_MAX,  16);
   uint16_t v  = float_to_uint(0.0f, V_MIN,  V_MAX,  12);
-  uint16_t kp = float_to_uint(0.0f, KP_MIN, KP_MAX, 12);   // 0
-  uint16_t kd = float_to_uint(0.0f, KD_MIN, KD_MAX, 12);   // 0
-  uint16_t t  = float_to_uint(0.0f, T_MIN,  T_MAX,  12);   // 0 N·m
+  uint16_t kp = float_to_uint(probe_kp, KP_MIN, KP_MAX, 12);
+  uint16_t kd = float_to_uint(probe_kd, KD_MIN, KD_MAX, 12);
+  uint16_t t  = float_to_uint(0.0f, T_MIN,  T_MAX,  12);   // 항상 0 N·m
 
   twai_message_t m = {};
   m.identifier = CAN_MODE | id;
@@ -197,8 +215,20 @@ void handleSerial() {
     for (int i = 0; i < 16; i++) mot[i].frames = 0;
     collide = 0;
     Serial.println(">>> 카운터 초기화");
+  } else if (s == "0") {
+    probe_kp = 0;  probe_kd = 0;
+    Serial.println(">>> 게인 0 — 무동력으로 복귀");
+  } else if (s.startsWith("p")) {
+    float v = s.substring(1).toFloat();
+    probe_kp = constrain(v, 0.0f, PROBE_KP_MAX);
+    Serial.printf(">>> Kp = %.2f  (상한 %.1f)  25°에서 %.2f N·m\n",
+                  probe_kp, PROBE_KP_MAX, probe_kp * 25.0f * DEG_TO_RAD);
+  } else if (s.startsWith("i")) {
+    float v = s.substring(1).toFloat();
+    probe_kd = constrain(v, 0.0f, PROBE_KD_MAX);
+    Serial.printf(">>> Kd = %.2f  (상한 %.1f)\n", probe_kd, PROBE_KD_MAX);
   } else {
-    Serial.println("명령: e(enable) / d(disable) / z(영점) / c(카운터 초기화)");
+    Serial.println("명령: e/d(enable·disable) z(영점) c(카운터) 0(게인0) p<값>(Kp) i<값>(Kd)");
   }
 }
 
@@ -222,8 +252,9 @@ void setup() {
                  CAN_MODE | CAN_ID_A, CAN_ID_A, CAN_MODE | CAN_ID_B, CAN_ID_B);
   Serial.println("  이 주소로 프레임이 들어오면 아직 충돌 상태입니다.");
   Serial.println("--------------------------------------------------");
-  Serial.println("  e  enable (토크 0)   d  disable");
+  Serial.println("  e  enable            d  disable");
   Serial.println("  z  영점 재설정        c  카운터 초기화");
+  Serial.println("  p<값>  Kp (상한 5)   i<값>  Kd (상한 1)   0  게인 0");
   Serial.println("==================================================\n");
 }
 
@@ -241,7 +272,8 @@ void loop() {
 
   if (millis() - lastPrint >= 200) {        // 5Hz
     lastPrint = millis();
-    Serial.printf("[%s] 충돌:%lu | ", enabled ? "EN " : "DIS", collide);
+    Serial.printf("[%s Kp%.2f Kd%.2f] 충돌:%lu | ",
+                  enabled ? "EN " : "DIS", probe_kp, probe_kd, collide);
     for (uint8_t id : {CAN_ID_A, CAN_ID_B}) {
       MotorInfo &m = mot[id];
       Serial.printf("모터%02X(rx 0x%03X %s %lu회) pos=%+7.2f°  ",

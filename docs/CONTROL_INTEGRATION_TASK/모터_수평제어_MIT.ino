@@ -338,10 +338,17 @@ void sendBoth() {
 //  arm / disarm
 // =============================================================================
 void motorsArm() {
+  /* imu_ok 는 워치독이 한 번 false 로 내리면 스스로 돌아오지 않는다.
+   * 접촉 불량으로 잠깐 끊겼다 복구돼도 재부팅 전까지 arm 이 막혀버리므로,
+   * 저장된 값을 믿지 말고 여기서 직접 다시 읽는다.
+   */
+  uint8_t id = readReg(REG_WHO_AM_I);
+  imu_ok = (id == WHO_AM_I_VAL);
   if (!imu_ok) {
-    Serial.println("!! IMU 이상 — arm 거부");
+    Serial.printf("!! IMU 응답 0x%02X (기대 0x%02X) — arm 거부\n", id, WHO_AM_I_VAL);
     return;
   }
+  rej_run = 0;
   Serial.println(">>> arm: 트레이 중립 / 차체 수평 상태여야 합니다");
   broadcastUniversal(0xFB);  delay(50);   // 에러 해제
   broadcastUniversal(0xFE);  delay(50);   // 현재 위치를 영점으로
@@ -352,6 +359,11 @@ void motorsArm() {
   delay(50);
 
   broadcastUniversal(0xFC);  delay(100);  // enable
+
+  /* 영점을 다시 잡았으므로 이전 위치값은 의미가 없다.
+   * 지우지 않으면 위치 한계 검사가 낡은 값을 보고 곧바로 disarm 시킬 수 있다.
+   */
+  for (int i = 0; i < 4; i++) act_deg[i] = 0;
   lastFb = millis();                      // 피드백 타임아웃 기준점
   armed = true;
   Serial.printf(">>> ARMED  GAIN=%.2f  Kp=%.1f  Kd=%.2f  제한 ±%.0f°\n",

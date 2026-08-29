@@ -22,7 +22,7 @@
  *             (현재는 벤치용. 최종적으로 로봇 차체 하단에 부착할 센서)
  *   모터    : CAN 짐벌모터 2축, 1Mbit/s, TX=GPIO4 / RX=GPIO5
  *
- * 축 규약 (docs/CONTROL_INTEGRATION_TASK/README.md)
+ * 축 규약 (상위 폴더의 README.md)
  *   pitch = X축 중심 회전,  +pitch = 보드 +Y축 쪽이 위로
  *   roll  = Y축 중심 회전,  +roll  = 보드 +X축 쪽이 아래로
  *

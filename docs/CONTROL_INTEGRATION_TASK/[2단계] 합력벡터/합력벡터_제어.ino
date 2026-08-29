@@ -669,26 +669,38 @@ void loop() {
   drainCAN();
 
   // ── 3. 합력 벡터 목표각 ──
-  /* 측정 가속도에서 중력 성분을 뺀다. 가속도계는 기울어져 있기만 해도
-   * 중력을 읽으므로, θ_base 로 그 몫을 계산해 제거해야 순수 선형 가속이 남는다.
-   * 1g 에 해당하는 LSB 는 G_LSB × g_scale (부팅 시 정규화한 값).
+  /* 두 축의 부호 규약이 반대라는 점이 이 블록 전체를 지배한다.
    *
-   * ⚠ 두 축의 부호가 다르다. 각도 정의가 다르기 때문이다.
+   *     pitch 는  +ay  로,   roll 은  -ax  로 각도를 정의했다 (README 참고).
    *
-   *     pitch_acc = atan2( ay, ...)   →   ay = +g·sin(pitch)
-   *     roll_acc  = atan2(-ax, ...)   →   ax = −g·sin(roll)     ★ 음수
+   * 그래서 roll 의 가속도 성분을 처음부터 -ax 로 잡는다. 그러면 중력 제거도
+   * 목표각 계산도 두 축이 똑같은 식이 되어, 규약을 틀릴 자리가 한 곳뿐이다.
+   * 축마다 부호를 따로 들고 있으면 두 곳에서 어긋난다 — 실제로 그랬다.
    *
-   * roll 은 중력 성분이 이미 음수라 빼는 게 아니라 더해야 상쇄된다.
-   * 처음에 둘 다 빼도록 썼다가 roll 만 중력이 두 배로 남았다. 평평한데
-   * roll 2.5° 에서 ref_roll 이 −5° 로, 조금만 기울이면 상한에 포화됐다.
+   *   1차 : 중력 제거를 두 축 다 빼도록 써서 roll 만 중력이 두 배로 남았다.
+   *          평평한데 ref_roll 이 -5°, 조금만 기울이면 상한에 포화.
+   *   2차 : 목표각 부호를 DIR_ACC 하나로 공유해 pitch 만 반대가 됐다.
+   *          정지 상태로는 안 보이고 가속할 때만 나타난다.
    */
-  float one_g   = G_LSB * g_scale;
-  float a_lin_y = (float)ay - one_g * sinf(pitch_filtered * DEG_TO_RAD);
-  float a_lin_x = (float)ax + one_g * sinf(roll_filtered  * DEG_TO_RAD);
+  float one_g = G_LSB * g_scale;
 
-  // 합력이 수직에서 벗어난 각도.  θ = atan(a_linear / g)
-  float raw_ref_p = atan2f(a_lin_y, one_g) * RAD_TO_DEG * DIR_ACC;
-  float raw_ref_r = atan2f(a_lin_x, one_g) * RAD_TO_DEG * DIR_ACC;
+  float acc_p =  (float)ay;     // pitch 규약의 가속도 성분
+  float acc_r = -(float)ax;     // roll  규약의 가속도 성분  ★ 각도 정의와 동일
+
+  /* 가속도계는 기울어져 있기만 해도 중력을 읽는다. theta_base 로 그 몫을
+   * 계산해 빼야 순수한 선형 가속만 남는다.
+   */
+  float p_lin = acc_p - one_g * sinf(pitch_filtered * DEG_TO_RAD);
+  float r_lin = acc_r - one_g * sinf(roll_filtered  * DEG_TO_RAD);
+
+  /* 합력이 수직에서 벗어난 각도.  theta_ref = -atan(a_linear / g)
+   *
+   * 앞의 마이너스가 물리다. +Y 로 가속하면 액체는 -Y 로 쏠리므로 트레이의
+   * +Y 쪽을 내려야 하고, 우리 규약에서 +pitch 는 +Y 가 올라가는 것이라
+   * 목표각은 음수가 된다. DIR_ACC 는 실측용으로 남겨둔 뒤집기다.
+   */
+  float raw_ref_p = -atan2f(p_lin, one_g) * RAD_TO_DEG * DIR_ACC;
+  float raw_ref_r = -atan2f(r_lin, one_g) * RAD_TO_DEG * DIR_ACC;
 
   raw_ref_p = constrain(raw_ref_p, -ACC_REF_LIMIT, ACC_REF_LIMIT);
   raw_ref_r = constrain(raw_ref_r, -ACC_REF_LIMIT, ACC_REF_LIMIT);

@@ -38,7 +38,7 @@
  *   stop      0° 로 되돌린 뒤 정지
  *   z         현재 위치를 영점으로
  *   a<값>     진폭 [deg]      예) a12    (상한 30)
- *   r<값>     속도 [deg/s]    예) r30    (상한 60)
+ *   r<값>     속도 [deg/s]    예) r60    (상한 150)
  *   kp<값>    강성 [N/rad]    예) kp2    (상한 5)
  *   kd<값>    감쇠 [N·s/rad]  예) kd0.1  (상한 1, 기본 0.05)
  *             올리면 부드럽고 시끄럽다. 내리면 조용하고 끊긴다.
@@ -64,7 +64,7 @@ const float T_MIN  = -10.0f, T_MAX  =  10.0f;
 
 // ── 시험 파라미터 (시리얼로 조정, 상한은 코드에 박음) ──
 float SWEEP_DEG  = 8.0f;    float SWEEP_DEG_MAX  = 30.0f;
-float SWEEP_RATE = 20.0f;   float SWEEP_RATE_MAX = 60.0f;
+float SWEEP_RATE = 20.0f;   float SWEEP_RATE_MAX = 150.0f;
 /* Kp / Kd 트레이드오프 — 부드러움 vs 소음
  *
  * 이 두 값이 서로 반대 방향으로 작용한다.
@@ -327,11 +327,16 @@ void setup() {
   Serial.println("  run     왕복 시작 (stop 까지 계속)");
   Serial.println("  stop    0° 로 되돌린 뒤 정지");
   Serial.println("  z       영점 재설정");
-  Serial.println("  a<값>   진폭 [deg]      예) a12   상한 30");
-  Serial.println("  r<값>   속도 [deg/s]    예) r30   상한 60");
-  Serial.println("  kp<값>  강성            예) kp2   상한 5");
-  Serial.println("  kd<값>  감쇠            예) kd0.1 상한 1  (올리면 부드럽고 시끄러움)");
   Serial.println("  ?       상태 출력");
+  Serial.println("--------------------------------------------------");
+  Serial.println("  값 조절            현재값    범위       예");
+  Serial.printf ("  a<값>  진폭 [deg]  %6.1f    1 ~ %-3.0f    a15\n",  SWEEP_DEG,  SWEEP_DEG_MAX);
+  Serial.printf ("  r<값>  속도 [deg/s]%6.1f    1 ~ %-3.0f    r60\n",  SWEEP_RATE, SWEEP_RATE_MAX);
+  Serial.printf ("  kp<값> 강성        %6.2f    0 ~ %-3.0f    kp2\n",  MOTOR_KP,   MOTOR_KP_MAX);
+  Serial.printf ("  kd<값> 감쇠        %6.2f    0 ~ %-3.0f    kd0.1\n", MOTOR_KD,   MOTOR_KD_MAX);
+  Serial.println("--------------------------------------------------");
+  Serial.printf ("  지금 설정이면 한 번 왕복에 %.1f 초\n", 4.0f * SWEEP_DEG / SWEEP_RATE);
+  Serial.println("  빠르게: r60    크게: a15    부드럽게(시끄러움): kd0.1");
   Serial.println("==================================================\n");
 }
 

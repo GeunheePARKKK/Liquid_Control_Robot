@@ -60,15 +60,38 @@ bool readReg(uint8_t addr, uint8_t reg, uint8_t &out) {
 void scanBus() {
   int found = 0;
   Serial.print("  응답 주소:");
+  Serial.flush();                       // 멈추더라도 여기까지는 보이게
   for (uint8_t a = 0x08; a <= 0x77; a++) {
     Wire.beginTransmission(a);
     if (Wire.endTransmission() == 0) {
       Serial.printf(" 0x%02X", a);
       found++;
     }
+    if ((a & 0x0F) == 0) { Serial.print("."); Serial.flush(); }   // 진행 표시
   }
   if (!found) Serial.print(" (없음)");
   Serial.println();
+}
+
+/* I2C 를 시작하기 전에 두 선의 유휴 레벨을 본다.
+ * 풀업이 없으면 라인이 HIGH 로 못 올라가고, 그 상태로 통신을 시작하면
+ * 드라이버가 버스가 비기를 기다리며 멈춰버린다 (스캔이 첫 줄에서 정지).
+ */
+bool checkIdle() {
+  pinMode(PIN_SDA, INPUT_PULLUP);
+  pinMode(PIN_SCL, INPUT_PULLUP);
+  delay(50);
+  int sda = digitalRead(PIN_SDA);
+  int scl = digitalRead(PIN_SCL);
+
+  Serial.printf("유휴 레벨:  SDA=%d  SCL=%d   (둘 다 1 이어야 정상)\n", sda, scl);
+  if (sda && scl) return true;
+
+  Serial.println("!! 라인이 LOW 로 눌려 있다. 이 상태로는 I2C 가 시작되지 않는다.");
+  if (!sda) Serial.println("   SDA(GPIO11) 가 LOW — SDO 를 GND 에 꽂을 때 SDA 자리에 꽂지 않았는지 확인");
+  if (!scl) Serial.println("   SCL(GPIO12) 가 LOW — 배선 확인");
+  Serial.println("   풀업이 없어서일 수도 있다. 4.7kΩ 을 SDA·SCL 에서 3V3 으로 달 것.");
+  return false;
 }
 
 void setup() {
@@ -80,8 +103,17 @@ void setup() {
   Serial.println("배선: CS→3V3, SDO→GND 로 바꿔야 한다");
   Serial.println("------------------------------------");
 
+  bool idle_ok = checkIdle();
+
   Wire.begin(PIN_SDA, PIN_SCL, 100000);   // 100kHz — 느릴수록 잘 잡힌다
+  Wire.setTimeOut(50);                    // 응답 없는 주소에서 멈추지 않게
   delay(100);
+
+  if (!idle_ok) {
+    Serial.println("------------------------------------");
+    Serial.println("유휴 레벨이 비정상이지만 그래도 스캔은 시도한다.");
+  }
+  Serial.println("------------------------------------");
 }
 
 void loop() {

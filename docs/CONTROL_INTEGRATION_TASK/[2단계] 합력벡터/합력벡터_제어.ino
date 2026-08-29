@@ -92,19 +92,19 @@
 #define CAN_ID_PITCH  0x02
 #define CAN_ID_ROLL   0x01
 
-/* 모터 회전 방향 부호. 트레이가 기울기를 키우는 쪽으로 돌면 뒤집는다.
+/* 모터 회전 방향 부호. CAN 으로 나갈 때만 곱해진다 (sendBoth 참고).
+ * 제어식에는 들어가지 않으므로 cmd_pitch / cmd_roll 은 이 값과 무관하게
+ * 항상 물리적으로 맞는 값이다. +30° 기울면 −30° 가 찍힌다.
  *
- * 2026-08-29 실측 — IMU 를 손에 든 채 기울여 확인했다.
- *   바깥축 (0x01, ROLL 채널)  기울기 반대로 돈다        → +1 유지
- *   안쪽축 (0x02, PITCH 채널) 기울기와 같은 쪽으로 돈다 → −1 로 뒤집음
+ * ⚠ IMU 를 손에 들고 있는 동안에는 이 부호를 확정할 수 없다.
+ *   pitch 가 짐벌의 어느 물리 축에 대응하는지가 잡는 방향에 따라 바뀐다.
+ *   90° 돌려 잡으면 두 축이 맞바뀌므로, 부호를 어떻게 두든 한 축은 어긋난다.
+ *   실제로 "안쪽축만 반대로 돈다" 는 관찰로 DIR_PITCH 를 −1 로 뒤집었다가
+ *   잡는 방향 때문이었음이 드러나 되돌렸다.
  *
- * 같은 쪽으로 도는 것은 기울기를 키우는 양의 되먹임이라 게인을 올리면 발산한다.
- *
- * ⚠ 이 부호는 잠정값이다. pitch/roll 과 모터의 배정 자체가 아직 임시이고
- *   (README 의 "미확정" 절 참고), 지금은 IMU 가 짐벌 축과 고정된 관계가 없다.
- *   차체에 실장한 뒤 dp / dr 명령으로 다시 확인할 것.
+ *   차체에 실장해 IMU 와 짐벌 축이 고정된 뒤 dp / dr 로 확정할 것.
  */
-float DIR_PITCH = -1.0f;
+float DIR_PITCH = +1.0f;
 float DIR_ROLL  = +1.0f;
 
 // ── 제어 파라미터 ──
@@ -334,9 +334,13 @@ void broadcastUniversal(uint8_t last) {
   sendUniversal(CAN_ID_ROLL,  last);
 }
 
+/* DIR 은 여기서만 곱한다. 모터 배선·장착 방향을 고쳐도 제어식과 화면 숫자는
+ * 흔들리지 않는다. 두 관심사를 한 노브에 묶으면 부호를 뒤집을 때마다 로그의
+ * 의미가 같이 바뀌어 무엇을 보고 있는지 알 수 없게 된다.
+ */
 void sendBoth() {
-  sendMIT(CAN_ID_PITCH, cmd_pitch * DEG_TO_RAD, 0.0f, MOTOR_KP, MOTOR_KD, 0.0f);
-  sendMIT(CAN_ID_ROLL,  cmd_roll  * DEG_TO_RAD, 0.0f, MOTOR_KP, MOTOR_KD, 0.0f);
+  sendMIT(CAN_ID_PITCH, cmd_pitch * DIR_PITCH * DEG_TO_RAD, 0.0f, MOTOR_KP, MOTOR_KD, 0.0f);
+  sendMIT(CAN_ID_ROLL,  cmd_roll  * DIR_ROLL  * DEG_TO_RAD, 0.0f, MOTOR_KP, MOTOR_KD, 0.0f);
 }
 
 
@@ -737,8 +741,8 @@ void loop() {
   /* ACC_GAIN 이 0 이면 θ_ref 항이 사라져 1단계(−θ_base)와 완전히 같아진다.
    * 모터는 차체 기준으로 돌므로 절대 목표각에서 차체 자세를 뺀다.
    */
-  float want_pitch = (ACC_GAIN * ref_pitch - pitch_filtered * GAIN) * DIR_PITCH;
-  float want_roll  = (ACC_GAIN * ref_roll  - roll_filtered  * GAIN) * DIR_ROLL;
+  float want_pitch = ACC_GAIN * ref_pitch - pitch_filtered * GAIN;
+  float want_roll  = ACC_GAIN * ref_roll  - roll_filtered  * GAIN;
 
   want_pitch = constrain(want_pitch, -LIMIT_DEG, LIMIT_DEG);
   want_roll  = constrain(want_roll,  -LIMIT_DEG, LIMIT_DEG);
@@ -762,8 +766,10 @@ void loop() {
     lastPrint = millis();
     Serial.printf("pitch:%.2f,ref_pitch:%.2f,cmd_pitch:%.2f,act_pitch:%.2f,"
                   "roll:%.2f,ref_roll:%.2f,cmd_roll:%.2f,act_roll:%.2f\n",
-                  pitch_filtered, ref_pitch, cmd_pitch, act_deg[CAN_ID_PITCH & 0x03],
-                  roll_filtered,  ref_roll,  cmd_roll,  act_deg[CAN_ID_ROLL  & 0x03]);
+                  pitch_filtered, ref_pitch, cmd_pitch,
+                  act_deg[CAN_ID_PITCH & 0x03] * DIR_PITCH,
+                  roll_filtered,  ref_roll,  cmd_roll,
+                  act_deg[CAN_ID_ROLL  & 0x03] * DIR_ROLL);
   }
 
   if (millis() - lastCheck > 2000) {

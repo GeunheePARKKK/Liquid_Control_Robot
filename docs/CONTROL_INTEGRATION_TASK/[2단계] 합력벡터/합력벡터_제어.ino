@@ -672,10 +672,19 @@ void loop() {
   /* 측정 가속도에서 중력 성분을 뺀다. 가속도계는 기울어져 있기만 해도
    * 중력을 읽으므로, θ_base 로 그 몫을 계산해 제거해야 순수 선형 가속이 남는다.
    * 1g 에 해당하는 LSB 는 G_LSB × g_scale (부팅 시 정규화한 값).
+   *
+   * ⚠ 두 축의 부호가 다르다. 각도 정의가 다르기 때문이다.
+   *
+   *     pitch_acc = atan2( ay, ...)   →   ay = +g·sin(pitch)
+   *     roll_acc  = atan2(-ax, ...)   →   ax = −g·sin(roll)     ★ 음수
+   *
+   * roll 은 중력 성분이 이미 음수라 빼는 게 아니라 더해야 상쇄된다.
+   * 처음에 둘 다 빼도록 썼다가 roll 만 중력이 두 배로 남았다. 평평한데
+   * roll 2.5° 에서 ref_roll 이 −5° 로, 조금만 기울이면 상한에 포화됐다.
    */
   float one_g   = G_LSB * g_scale;
   float a_lin_y = (float)ay - one_g * sinf(pitch_filtered * DEG_TO_RAD);
-  float a_lin_x = (float)ax - one_g * sinf(roll_filtered  * DEG_TO_RAD);
+  float a_lin_x = (float)ax + one_g * sinf(roll_filtered  * DEG_TO_RAD);
 
   // 합력이 수직에서 벗어난 각도.  θ = atan(a_linear / g)
   float raw_ref_p = atan2f(a_lin_y, one_g) * RAD_TO_DEG * DIR_ACC;

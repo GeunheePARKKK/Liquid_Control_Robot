@@ -39,9 +39,9 @@
  *   z         현재 위치를 영점으로
  *   a<값>     진폭 [deg]      예) a12    (상한 30)
  *   r<값>     속도 [deg/s]    예) r30    (상한 60)
- *   kp<값>    강성 [N/rad]    예) kp2    (상한 2)
- *   kd<값>    감쇠 [N·s/rad]  예) kd0.1  (상한 1, 기본 0)
- *             0 이면 조용하다. 소리의 원인은 이 항이다.
+ *   kp<값>    강성 [N/rad]    예) kp2    (상한 5)
+ *   kd<값>    감쇠 [N·s/rad]  예) kd0.1  (상한 1, 기본 0.05)
+ *             올리면 부드럽고 시끄럽다. 내리면 조용하고 끊긴다.
  *   ?         상태 출력
  * -----------------------------------------------------------------------------
  */
@@ -65,23 +65,28 @@ const float T_MIN  = -10.0f, T_MAX  =  10.0f;
 // ── 시험 파라미터 (시리얼로 조정, 상한은 코드에 박음) ──
 float SWEEP_DEG  = 8.0f;    float SWEEP_DEG_MAX  = 30.0f;
 float SWEEP_RATE = 20.0f;   float SWEEP_RATE_MAX = 60.0f;
-/* 이 스케치는 "모터가 도는가" 만 본다. 제자리를 단단히 지킬 필요가 없으므로
- * Kd 를 0 으로 둔다.
+/* Kp / Kd 트레이드오프 — 부드러움 vs 소음
  *
- * Kd 를 주면 드라이버가 엔코더에서 추정한 속도에 그 값을 곱해 토크를 만드는데,
- * 그 속도값이 정지 상태에서도 양자화 때문에 떨린다. 그래서 "위이잉" 소리가
- * 난다. motor_test.ino(위치/속도 모드)가 조용한 것은 감쇠를 드라이버 내부
- * 루프가 처리하고 우리가 Kd 를 보내지 않기 때문이다.
+ * 이 두 값이 서로 반대 방향으로 작용한다.
  *
- * Kd 0 은 실측에서 Kp 1 까지는 소리 없이 약간 흔들리다 수렴했다.
- * 다만 매뉴얼은 위치 제어에서 kd=0 을 경고하고, Kp 3 은 실제로 발산했다.
- * 그래서 이 스케치의 Kp 상한을 2 로 낮춰 둔다. 제어용이 아니라 시험용이다.
+ *   Kd = 0     조용하지만 뚝뚝 끊긴다 (스틱슬립).
+ *              토크가 정지마찰을 넘을 때까지 오차가 쌓였다가 훅 미끄러지고,
+ *              오차가 줄면 다시 멈춘다. 이게 반복된다.
  *
- * 제자리 유지가 필요한 실제 제어는 모터_수평제어_MIT.ino 를 쓴다. 거기는
- * Kd 0.1 이 들어간다.
+ *   Kd > 0     부드럽게 움직인다. 대신 드라이버가 엔코더 속도 추정값에
+ *              이 값을 곱해 토크를 만드는데, 그 추정값이 정지 상태에서도
+ *              양자화 때문에 떨려서 "위이잉" 소리가 난다.
+ *
+ * motor_test.ino(위치/속도 모드)가 조용하면서도 매끄러웠던 것은 드라이버
+ * 내부 캐스케이드가 Position KP 54 에 적분항까지 갖고 훨씬 세게 밀기
+ * 때문이다. MIT 모드에는 그 내부 루프가 없어 우리가 대신 잡아야 한다.
+ *
+ * 아래 기본값은 그 중간이다. 끊기면 kd 를 올리고, 시끄러우면 내린다.
+ * 토크가 부족해 끊기는 것 같으면 kp 를 올려도 된다 (Kd 와 같이 올릴 것).
+ * 잘 안 잡히면 진폭·속도(a / r)를 바꿔보는 것도 방법이다.
  */
-float MOTOR_KP   = 1.0f;    float MOTOR_KP_MAX   = 2.0f;
-float MOTOR_KD   = 0.0f;    float MOTOR_KD_MAX   = 1.0f;
+float MOTOR_KP   = 1.0f;    float MOTOR_KP_MAX   = 5.0f;
+float MOTOR_KD   = 0.05f;   float MOTOR_KD_MAX   = 1.0f;
 
 // 실제 위치가 진폭보다 이만큼 더 벗어나면 폭주로 보고 정지
 const float ACT_MARGIN_DEG = 25.0f;
@@ -288,7 +293,7 @@ void handleSerial() {
   } else if (u.startsWith("kd")) {
     MOTOR_KD = constrain(s.substring(2).toFloat(), 0.0f, MOTOR_KD_MAX);
     Serial.printf(">>> Kd = %.2f  (상한 %.1f)\n", MOTOR_KD, MOTOR_KD_MAX);
-    if (MOTOR_KD == 0.0f) Serial.println("   (Kd 0 — 조용하지만 제자리 유지력은 없다. 시험용 기본값)");
+    if (MOTOR_KD == 0.0f) Serial.println("   (Kd 0 — 조용하지만 스틱슬립으로 끊긴다)");
   } else if (u.startsWith("a")) {
     SWEEP_DEG = constrain(s.substring(1).toFloat(), 1.0f, SWEEP_DEG_MAX);
     Serial.printf(">>> 진폭 = ±%.0f°  (상한 %.0f)\n", SWEEP_DEG, SWEEP_DEG_MAX);
@@ -324,8 +329,8 @@ void setup() {
   Serial.println("  z       영점 재설정");
   Serial.println("  a<값>   진폭 [deg]      예) a12   상한 30");
   Serial.println("  r<값>   속도 [deg/s]    예) r30   상한 60");
-  Serial.println("  kp<값>  강성            예) kp2   상한 2");
-  Serial.println("  kd<값>  감쇠            예) kd0.1 상한 1  (기본 0 — 조용)");
+  Serial.println("  kp<값>  강성            예) kp2   상한 5");
+  Serial.println("  kd<값>  감쇠            예) kd0.1 상한 1  (올리면 부드럽고 시끄러움)");
   Serial.println("  ?       상태 출력");
   Serial.println("==================================================\n");
 }

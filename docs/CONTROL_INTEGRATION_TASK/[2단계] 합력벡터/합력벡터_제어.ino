@@ -92,8 +92,19 @@
 #define CAN_ID_PITCH  0x02
 #define CAN_ID_ROLL   0x01
 
-/* 모터 회전 방향 부호. 트레이가 반대로 돌면 해당 축을 −1 로 뒤집는다. */
-float DIR_PITCH = +1.0f;
+/* 모터 회전 방향 부호. 트레이가 기울기를 키우는 쪽으로 돌면 뒤집는다.
+ *
+ * 2026-08-29 실측 — IMU 를 손에 든 채 기울여 확인했다.
+ *   바깥축 (0x01, ROLL 채널)  기울기 반대로 돈다        → +1 유지
+ *   안쪽축 (0x02, PITCH 채널) 기울기와 같은 쪽으로 돈다 → −1 로 뒤집음
+ *
+ * 같은 쪽으로 도는 것은 기울기를 키우는 양의 되먹임이라 게인을 올리면 발산한다.
+ *
+ * ⚠ 이 부호는 잠정값이다. pitch/roll 과 모터의 배정 자체가 아직 임시이고
+ *   (README 의 "미확정" 절 참고), 지금은 IMU 가 짐벌 축과 고정된 관계가 없다.
+ *   차체에 실장한 뒤 dp / dr 명령으로 다시 확인할 것.
+ */
+float DIR_PITCH = -1.0f;
 float DIR_ROLL  = +1.0f;
 
 // ── 제어 파라미터 ──
@@ -522,6 +533,17 @@ void handleSerial() {
     float v = s.substring(2).toFloat();
     if (v > 0.0f && v <= 1.0f) { ACC_LPF = v; Serial.printf(">>> ACC_LPF = %.2f\n", ACC_LPF); }
     else Serial.println("!! ACC_LPF 범위 0 ~ 1");
+  } else if (u == "dp" || u == "dr") {     // d 보다 먼저 검사할 것
+    /* 부호를 뒤집으면 지령이 반대편으로 간다. 슬루(MAX_RATE)가 걸려 있어
+     * 계단이 아니라 램프로 넘어가지만, 기울어져 있을수록 이동량이 크다.
+     */
+    bool isP = (u == "dp");
+    float &d = isP ? DIR_PITCH : DIR_ROLL;
+    d = -d;
+    Serial.printf(">>> DIR_%s = %+.0f  (%s축)\n",
+                  isP ? "PITCH" : "ROLL", d, isP ? "안쪽" : "바깥");
+    Serial.println("    기울였을 때 트레이가 반대로 돌면 맞습니다");
+    if (armed) Serial.println("    !! ARMED 상태 — 지령이 반대편으로 이동합니다");
   } else if (u.startsWith("g")) {
     float v = s.substring(1).toFloat();
     if (v >= 0.0f && v <= 1.5f) { GAIN = v; Serial.printf(">>> GAIN = %.2f\n", GAIN); }
@@ -540,7 +562,7 @@ void handleSerial() {
   } else if (u == "?") {
     printStatus();
   } else {
-    Serial.println("명령: arm / stop / z / t / q / g / kp / kd / f / d / ?");
+    Serial.println("명령: arm / stop / z / t / q / g / ag / ad / kp / kd / f / d / dp / dr / ?");
   }
 }
 
@@ -615,6 +637,8 @@ void setup() {
   Serial.println("  ad<값>  합력 필터     예) ad0.2");
   Serial.println("  kp<값>  모터 강성     kd<값>  모터 감쇠");
   Serial.println("  f<값>   지령 필터     d<값>   CAN 분주     ?  상태");
+  Serial.printf ("  dp / dr 부호 뒤집기   현재 %+.0f / %+.0f  (안쪽 / 바깥)\n",
+                 DIR_PITCH, DIR_ROLL);
   Serial.println("==================================================\n");
 }
 

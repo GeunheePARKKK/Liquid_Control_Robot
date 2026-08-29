@@ -556,6 +556,19 @@ void handleSerial() {
                   isP ? "PITCH" : "ROLL", d, isP ? "안쪽" : "바깥");
     Serial.println("    기울였을 때 트레이가 반대로 돌면 맞습니다");
     if (armed) Serial.println("    !! ARMED 상태 — 지령이 반대편으로 이동합니다");
+  } else if (u.startsWith("r")) {          // 슬루 제한 [deg/s]
+    /* 가속 목표각은 0.11초에 17° 까지 오른다 (155°/s). 30°/s 로는 3.3° 밖에
+     * 못 따라가므로 ACC_GAIN 을 아무리 올려도 결과가 같다. 실측으로 확인됐다.
+     * 지령 변화율의 27% 가 한계에 붙어 있었다 — 수평제어만 켰을 때도 그렇다.
+     */
+    float v = s.substring(1).toFloat();
+    if (v >= 5.0f && v <= 400.0f) {
+      MAX_RATE = v;
+      Serial.printf(">>> MAX_RATE = %.0f °/s  (%.0fms 안에 %.1f° 이동 가능)\n",
+                    MAX_RATE, 110.0f, MAX_RATE * 0.11f);
+      if (v > 200.0f)
+        Serial.println("   !! 지령이 모터보다 빨라집니다. 드룹·진동을 보세요");
+    } else Serial.println("!! MAX_RATE 범위 5 ~ 400");
   } else if (u.startsWith("g")) {
     float v = s.substring(1).toFloat();
     if (v >= 0.0f && v <= 1.5f) { GAIN = v; Serial.printf(">>> GAIN = %.2f\n", GAIN); }
@@ -574,7 +587,7 @@ void handleSerial() {
   } else if (u == "?") {
     printStatus();
   } else {
-    Serial.println("명령: arm / stop / z / t / q / g / ag / ad / kp / kd / f / d / dp / dr / ?");
+    Serial.println("명령: arm / stop / z / t / q / g / ag / ad / kp / kd / f / r / d / dp / dr / ?");
   }
 }
 
@@ -649,6 +662,7 @@ void setup() {
   Serial.println("  ad<값>  합력 필터     예) ad0.2");
   Serial.println("  kp<값>  모터 강성     kd<값>  모터 감쇠");
   Serial.println("  f<값>   지령 필터     d<값>   CAN 분주     ?  상태");
+  Serial.printf ("  r<값>   슬루 제한     예) r120    현재 %.0f °/s\n", MAX_RATE);
   Serial.printf ("  dp / dr 부호 뒤집기   현재 %+.0f / %+.0f  (안쪽 / 바깥)\n",
                  DIR_PITCH, DIR_ROLL);
   Serial.println("==================================================\n");

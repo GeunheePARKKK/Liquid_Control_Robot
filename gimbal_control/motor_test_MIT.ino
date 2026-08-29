@@ -39,8 +39,9 @@
  *   z         현재 위치를 영점으로
  *   a<값>     진폭 [deg]      예) a12    (상한 30)
  *   r<값>     속도 [deg/s]    예) r30    (상한 60)
- *   kp<값>    강성 [N/rad]    예) kp2    (상한 20)
- *   kd<값>    감쇠 [N·s/rad]  예) kd0.1  (상한 2)
+ *   kp<값>    강성 [N/rad]    예) kp2    (상한 2)
+ *   kd<값>    감쇠 [N·s/rad]  예) kd0.1  (상한 1, 기본 0)
+ *             0 이면 조용하다. 소리의 원인은 이 항이다.
  *   ?         상태 출력
  * -----------------------------------------------------------------------------
  */
@@ -64,8 +65,23 @@ const float T_MIN  = -10.0f, T_MAX  =  10.0f;
 // ── 시험 파라미터 (시리얼로 조정, 상한은 코드에 박음) ──
 float SWEEP_DEG  = 8.0f;    float SWEEP_DEG_MAX  = 30.0f;
 float SWEEP_RATE = 20.0f;   float SWEEP_RATE_MAX = 60.0f;
-float MOTOR_KP   = 1.0f;    float MOTOR_KP_MAX   = 20.0f;   // 실측 적정값 1
-float MOTOR_KD   = 0.1f;    float MOTOR_KD_MAX   = 2.0f;    // 실측 적정값 0.1
+/* 이 스케치는 "모터가 도는가" 만 본다. 제자리를 단단히 지킬 필요가 없으므로
+ * Kd 를 0 으로 둔다.
+ *
+ * Kd 를 주면 드라이버가 엔코더에서 추정한 속도에 그 값을 곱해 토크를 만드는데,
+ * 그 속도값이 정지 상태에서도 양자화 때문에 떨린다. 그래서 "위이잉" 소리가
+ * 난다. motor_test.ino(위치/속도 모드)가 조용한 것은 감쇠를 드라이버 내부
+ * 루프가 처리하고 우리가 Kd 를 보내지 않기 때문이다.
+ *
+ * Kd 0 은 실측에서 Kp 1 까지는 소리 없이 약간 흔들리다 수렴했다.
+ * 다만 매뉴얼은 위치 제어에서 kd=0 을 경고하고, Kp 3 은 실제로 발산했다.
+ * 그래서 이 스케치의 Kp 상한을 2 로 낮춰 둔다. 제어용이 아니라 시험용이다.
+ *
+ * 제자리 유지가 필요한 실제 제어는 모터_수평제어_MIT.ino 를 쓴다. 거기는
+ * Kd 0.1 이 들어간다.
+ */
+float MOTOR_KP   = 1.0f;    float MOTOR_KP_MAX   = 2.0f;
+float MOTOR_KD   = 0.0f;    float MOTOR_KD_MAX   = 1.0f;
 
 // 실제 위치가 진폭보다 이만큼 더 벗어나면 폭주로 보고 정지
 const float ACT_MARGIN_DEG = 25.0f;
@@ -272,7 +288,7 @@ void handleSerial() {
   } else if (u.startsWith("kd")) {
     MOTOR_KD = constrain(s.substring(2).toFloat(), 0.0f, MOTOR_KD_MAX);
     Serial.printf(">>> Kd = %.2f  (상한 %.1f)\n", MOTOR_KD, MOTOR_KD_MAX);
-    if (MOTOR_KD == 0.0f) Serial.println("   !! Kd 0 은 매뉴얼상 발진·폭주 조건입니다");
+    if (MOTOR_KD == 0.0f) Serial.println("   (Kd 0 — 조용하지만 제자리 유지력은 없다. 시험용 기본값)");
   } else if (u.startsWith("a")) {
     SWEEP_DEG = constrain(s.substring(1).toFloat(), 1.0f, SWEEP_DEG_MAX);
     Serial.printf(">>> 진폭 = ±%.0f°  (상한 %.0f)\n", SWEEP_DEG, SWEEP_DEG_MAX);
@@ -308,8 +324,8 @@ void setup() {
   Serial.println("  z       영점 재설정");
   Serial.println("  a<값>   진폭 [deg]      예) a12   상한 30");
   Serial.println("  r<값>   속도 [deg/s]    예) r30   상한 60");
-  Serial.println("  kp<값>  강성            예) kp2   상한 20");
-  Serial.println("  kd<값>  감쇠            예) kd0.1 상한 2");
+  Serial.println("  kp<값>  강성            예) kp2   상한 2");
+  Serial.println("  kd<값>  감쇠            예) kd0.1 상한 1  (기본 0 — 조용)");
   Serial.println("  ?       상태 출력");
   Serial.println("==================================================\n");
 }

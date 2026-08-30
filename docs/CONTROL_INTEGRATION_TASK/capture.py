@@ -7,6 +7,10 @@ arm 전후 구간을 통째로 캡처하는 진단용 스크립트.
   python capture.py --port COM5 --pre 3 --post 15
   python capture.py --port COM5 --cmd t --post 8     # 시험 구동 캡처
   python capture.py --port COM5 --cmd none           # 명령 없이 관찰만
+  python capture.py --port COM5 --cmd "r150,ag1.0,zv1,arm"   # 설정 후 캡처
+
+포트를 열면 보드가 리셋된다. 시리얼 모니터에서 걸어둔 값은 모두 날아가므로
+필요한 설정은 --cmd 에 나열해야 한다.
 
 각 줄 앞에 arm 기준 상대시간(초)이 붙는다. 음수 = arm 이전.
 """
@@ -54,12 +58,17 @@ def main(a):
         pump(t0 + a.pre, "PRE")
 
         if a.cmd.lower() != "none":
-            print(f"--- 명령 전송: {a.cmd} ---")
+            # 쉼표로 여러 명령을 순서대로 보낸다. 포트를 열면 보드가 리셋되어
+            # 시리얼로 걸어둔 설정이 날아가므로 여기서 다시 세운다.
+            cmds = [c.strip() for c in a.cmd.split(",") if c.strip()]
+            print("--- 명령 전송: " + " -> ".join(cmds) + " ---")
             t_cmd = time.time()
-            ser.write((a.cmd + "\n").encode())
-            ser.flush()
-            lines.append(f"{0.0:+7.2f} [CMD] >>> {a.cmd}")
-
+            for n, c in enumerate(cmds):
+                ser.write((c + "\n").encode())
+                ser.flush()
+                lines.append("%+7.2f [CMD] >>> %s" % (time.time()-t_cmd, c))
+                if n < len(cmds) - 1:
+                    pump(time.time() + a.gap, "CMD")
         print(f"--- {a.post}초 기록 ---")
         pump(time.time() + a.post, "POST")
 
@@ -88,6 +97,9 @@ if __name__ == "__main__":
     p.add_argument("--baud", type=int, default=115200)
     p.add_argument("--pre", type=float, default=5.0, help="명령 전 관찰 시간(초)")
     p.add_argument("--post", type=float, default=10.0, help="명령 후 기록 시간(초)")
-    p.add_argument("--cmd", default="arm", help="보낼 명령 (arm / t / none)")
+    p.add_argument("--cmd", default="arm",
+                   help="보낼 명령. 쉼표로 여러 개 (예: 'g1.0,r150,ag1.0,zv1,arm')")
+    p.add_argument("--gap", type=float, default=0.4,
+                   help="명령 사이 간격(초)")
     p.add_argument("--out", default="capture_log.txt")
     main(p.parse_args())

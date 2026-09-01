@@ -767,3 +767,37 @@ vel_pitch = VEL_LPF * raw_vp + (1.0f - VEL_LPF) * vel_pitch;
 
 `Kp 20` 에 계단 지령을 줘서 기구가 튕긴 직후라 감쇠를 최대한 살려두는 것이
 우선이었다. 지금은 슬루가 걸려 `v_des` 가 `MAX_RATE` 를 넘지 못하므로 풀 만하다.
+
+---
+
+## 지연 계측용 `raw_pitch` / `raw_roll` 추가 (2026-09-01)
+
+> **제어 로직은 변경하지 않았다.** `ACC_LPF` 적용 전 합력 목표각을 33 Hz
+> 스트림에 두 필드로 추가한 계측 변경이다.
+
+기존 출력에는 `ref`·`pre`·`cmd`·`act`가 있었지만 `ACC_LPF` 전의 값이 없어
+전체 지연을 모터 구간과 소프트웨어 필터 구간으로 분리할 수 없었다. 아래 두 값을
+추가했다.
+
+```text
+raw_pitch:<deg>,raw_roll:<deg>
+```
+
+신호 사슬은 다음처럼 해석한다.
+
+```text
+raw → ACC_LPF → ref → ZV → want → CMD_LPF → pre → slew → cmd → motor → act
+```
+
+변경은 세 곳뿐이다.
+
+1. `Snap`에 `raw_p`, `raw_r` 두 `float` 추가
+2. 같은 제어 틱의 지역변수 `raw_ref_p/r`을 스냅샷에 복사
+3. `ioTask`의 `Serial.printf`에 두 필드 추가
+
+`ctrlTask`의 목표각·필터·게인·슬루·CAN 계산은 바꾸지 않았다. 큐 항목이 8 byte
+커졌고 32개 큐 기준 정적 사용량이 약 256 byte 증가한다. USB CDC 출력 한 줄도
+길어지지만 포맷은 낮은 우선순위 `ioTask`에서 수행하므로 제어 주기는 막지 않는다.
+
+이 변경을 사용한 재현 로그와 분석 절차는
+[`지연_개선_실험/`](%EC%A7%80%EC%97%B0_%EA%B0%9C%EC%84%A0_%EC%8B%A4%ED%97%98/)에 있다.

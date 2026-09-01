@@ -390,6 +390,7 @@ uint32_t n_win = 0, err_win = 0, err_reset = 0;
  */
 struct Snap {
   uint32_t t;
+  float raw_p, raw_r;              // ACC_LPF 를 걸기 전의 합력 목표각
   float pre_p, pre_r, pitch, ref_p, zv_p, cmd_p, act_p;
   float roll, ref_r, zv_r, cmd_r, act_r;
 };
@@ -1276,6 +1277,13 @@ void ctrlTask(void *arg) {
        */
       Snap sn;
       sn.t     = millis();
+      /* raw : ACC_LPF 를 걸기 전. 이게 없으면 지연을 모터 구간(cmd→act)밖에
+       * 못 재는데, 실측하니 앞단 필터가 ACC_LPF 40ms + CMD_LPF 50ms 로
+       * 모터(85ms)보다 크다. 슬로싱 위상은 물리 가속부터 재야 뜻이 있으므로
+       * 사슬의 원점을 로그에 남긴다.
+       * raw_ref_p/r 은 같은 틱 안의 지역변수라 여기서 그대로 보인다.
+       */
+      sn.raw_p = raw_ref_p;       sn.raw_r = raw_ref_r;
       sn.pre_p = lpf_pitch;       sn.pre_r = lpf_roll;
       sn.pitch = pitch_filtered;  sn.ref_p = ref_pitch;
       sn.zv_p  = shaped_pitch;    sn.cmd_p = cmd_pitch;
@@ -1340,10 +1348,11 @@ void ioTask(void *arg) {
      * 대기를 만들면 IDLE 태스크가 굶어 워치독이 보드를 리셋시킨다.
      */
     if (xQueueReceive(qSnap, &sn, pdMS_TO_TICKS(5)) == pdTRUE) {
-      Serial.printf("t:%lu,pre_pitch:%.2f,pre_roll:%.2f,"
+      Serial.printf("t:%lu,raw_pitch:%.2f,raw_roll:%.2f,"
+                    "pre_pitch:%.2f,pre_roll:%.2f,"
                     "pitch:%.2f,ref_pitch:%.2f,zv_pitch:%.2f,cmd_pitch:%.2f,act_pitch:%.2f,"
                     "roll:%.2f,ref_roll:%.2f,zv_roll:%.2f,cmd_roll:%.2f,act_roll:%.2f\n",
-                    sn.t, sn.pre_p, sn.pre_r,
+                    sn.t, sn.raw_p, sn.raw_r, sn.pre_p, sn.pre_r,
                     sn.pitch, sn.ref_p, sn.zv_p, sn.cmd_p, sn.act_p,
                     sn.roll,  sn.ref_r, sn.zv_r, sn.cmd_r, sn.act_r);
     }

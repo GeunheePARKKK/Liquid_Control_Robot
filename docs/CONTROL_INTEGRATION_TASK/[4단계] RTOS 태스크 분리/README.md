@@ -4,7 +4,7 @@
 
 | 파일 | 용도 |
 |---|---|
-| [`zv_shaping_rtos/zv_shaping_rtos.ino`](zv_shaping_rtos/zv_shaping_rtos.ino) | **현행** — 3단계와 제어식이 동일하고 실행 구조만 다르다 |
+| [`zv_shaping_rtos.ino`](zv_shaping_rtos.ino) | **현행** — 3단계와 제어식이 동일하고 실행 구조만 다르다 |
 | [`zv_shaping_rtos.ino_변경이력.md`](zv_shaping_rtos.ino_변경이력.md) | 무엇을 왜 바꿨나 |
 
 > **폴더 안에 또 폴더를 둔 이유.** 아두이노 IDE 는 폴더명 == 파일명 이어야 스케치를

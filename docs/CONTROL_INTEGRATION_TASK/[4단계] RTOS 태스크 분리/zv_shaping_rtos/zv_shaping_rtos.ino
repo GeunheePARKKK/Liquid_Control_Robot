@@ -85,8 +85,14 @@
  *     zm<값>  임펄스 수               ★ 2        2 또는 3    2=ZV, 3=ZVD
  *
  *   모터                             기본값      범위        올릴 때
- *     kp<값>  강성 [N·m/rad]         ★ 1.0      0 ~ 500     3 은 Kd 0 에서 발산했다
- *     kd<값>  감쇠 [N·s/rad]         ★ 0.10     0 ~ 5       0 은 매뉴얼상 금지
+ *     kp<값>  강성 — 두 축 함께      ★ 2.0      0 ~ 500     3 은 Kd 0 에서 발산했다
+ *     kd<값>  감쇠 — 두 축 함께      ★ 0.13     0 ~ 5       0 은 매뉴얼상 금지
+ *     kpp/kpr 강성 — 안쪽/바깥 따로  ★ 2.0/2.0              예) kpr6
+ *     kdp/kdr 감쇠 — 안쪽/바깥 따로  ★ 0.13/0.13            예) kdr0.22
+ *
+ *       바깥축이 안쪽보다 81ms 느리다 (189 vs 108ms, 2026-09-01 실측).
+ *       관성이 커서 같은 Kp 로는 못 따라온다. kpr 을 올려 지연을 맞출 것.
+ *       Kp 를 올리면 Kd 도 sqrt 비율로 같이 올려야 발진하지 않는다.
  *     dp / dr 회전 방향 뒤집기       ★ −1 / +1  토글        안쪽 / 바깥
  *
  *   코드에만 있는 값 (명령 없음)
@@ -168,9 +174,42 @@ volatile int   CAN_DIV         = 2;       // [d]  기본 2      100Hz / 2 = 50Hz
  * ⚠ Kd 가 0 이 아니면 미세 진동이 생긴다. 엔코더 속도 추정 노이즈에 곱해지는
  *   것이라 원리적으로 못 없앤다.
  */
-volatile float MOTOR_KP = 2.0f;           // [kp] 실측 확정 2.0  드룹 54~82% -> 90%
-volatile float MOTOR_KD = 0.13f;          // [kd] 실측 확정 0.13  Kd ~ sqrt(Kp+k), k=0.28
-                                 //      떨림 0.010~0.018 도로 여유 있음. 0 은 금지
+/* ── 축별로 나눈 이유 (2026-09-01 실측) ──────────────────────────────────
+ * 지령→실제 지연을 상호상관으로 쟀더니 두 축이 크게 달랐다.
+ *
+ *     안쪽 (PITCH, 0x02)   108 ms   corr +0.961
+ *     바깥 (ROLL,  0x01)   189 ms   corr +0.925
+ *
+ * 지연을 보정하면 둘 다 지령을 잘 따라간다. 부호도 배선도 정상이고 바깥축이
+ * 느릴 뿐이다. 그런데 지연 0 에서의 상관은 안쪽 +0.681 / 바깥 +0.192 다.
+ * 지금 이 순간의 트레이 자세가 지금 필요한 자세와 거의 무관하다는 뜻이라,
+ * 눈으로 보면 바깥축이 엉뚱한 방향으로 도는 것처럼 보인다.
+ *
+ * 189 ms 는 슬로싱 주기 420 ms 의 45% 로 거의 역위상이다. 이대로 액체를
+ * 올리면 바깥축은 슬로싱을 억제하지 않고 키운다.
+ *
+ * 힘이 모자란 것이 아니다. 추종률이 0.94 로 크기는 충분히 간다. 대역폭이
+ * 문제고, 원인은 바깥축이 안쪽 짐벌과 트레이를 통째로 이고 있어 관성이
+ * 크기 때문이다.  ω ≈ √(Kp / J)  이므로 같은 Kp 로는 느릴 수밖에 없다.
+ *
+ * 189 → 108 ms 로 줄이려면 ω 를 1.75배, 즉 Kp 를 3배(2.0 → 6.0) 로 올려야
+ * 한다. 그러면 ζ = Kd / 2√(Kp·J) 가 √3 배 떨어지므로 Kd 도 1.7배
+ * (0.13 → 0.22) 를 같이 올린다. Kd 를 안 올리면 예전 바깥축에서 났던
+ * 1.75Hz 한계진동이 돌아온다.
+ *
+ * ★ 기본값은 두 축 같게 두었다. 계산값은 출발점일 뿐이라 kpr/kdr 로
+ *   올려가며 지연을 다시 재서 확정할 것. 바깥축은 발진 이력이 있는 축이다.
+ *
+ * ── 원래 주석 (2026-08-27 실측) ──
+ *   Kp 1     트레이를 잡는다. Kp 3 은 Kd 0 에서 발산했다.
+ *   Kd 0.1   밀었다 놓으면 왕복 없이 복귀. 0.05 는 1회 오버슛.
+ *   Kp 2.0   드룹 54~82% -> 90%
+ *   Kd 0.13  Kd ~ sqrt(Kp+k), k=0.28. 떨림 0.010~0.018도로 여유 있음
+ */
+volatile float KP_PITCH = 2.0f;    // [kpp] 안쪽 0x02
+volatile float KD_PITCH = 0.13f;   // [kdp]
+volatile float KP_ROLL  = 2.0f;    // [kpr] 바깥 0x01 — 올려야 할 쪽
+volatile float KD_ROLL  = 0.13f;   // [kdr]
 
 const float TORQUE_WARN = 3.0f;
 
@@ -367,7 +406,7 @@ volatile uint32_t dgTxFail = 0, dgSnapDrop = 0, dgEvtDrop = 0, dgCmdDrop = 0;
  * 링버퍼(zv_p/zv_r/zv_head)도 zvClear 가 통째로 지우므로 같은 문제가 있다.
  * 잠그는 시간은 float 256개 처리 수준(수 us)이라 제어에 영향이 없다.
  *
- * GAIN·MOTOR_KP·MAX_RATE 같은 홑겹 변수는 32비트 단일 접근이 원자적이라
+ * GAIN·KP_ROLL·MAX_RATE 같은 홑겹 변수는 32비트 단일 접근이 원자적이라
  * volatile 만으로 충분하다. 옛 값 아니면 새 값이지 섞인 값은 안 나온다.
  */
 portMUX_TYPE zvMux = portMUX_INITIALIZER_UNLOCKED;
@@ -537,8 +576,8 @@ void broadcastUniversal(uint8_t last) {
  * 의미가 같이 바뀌어 무엇을 보고 있는지 알 수 없게 된다.
  */
 void sendBoth() {
-  sendMIT(CAN_ID_PITCH, cmd_pitch * DIR_PITCH * DEG_TO_RAD, 0.0f, MOTOR_KP, MOTOR_KD, 0.0f);
-  sendMIT(CAN_ID_ROLL,  cmd_roll  * DIR_ROLL  * DEG_TO_RAD, 0.0f, MOTOR_KP, MOTOR_KD, 0.0f);
+  sendMIT(CAN_ID_PITCH, cmd_pitch * DIR_PITCH * DEG_TO_RAD, 0.0f, KP_PITCH, KD_PITCH, 0.0f);
+  sendMIT(CAN_ID_ROLL,  cmd_roll  * DIR_ROLL  * DEG_TO_RAD, 0.0f, KP_ROLL,  KD_ROLL,  0.0f);
 }
 
 
@@ -577,7 +616,7 @@ void motorsArm() {
   lastFb = millis();
   armed = true;
   qprintf(">>> ARMED  GAIN=%.2f  ACC_GAIN=%.2f  Kp=%.1f  Kd=%.2f  제한 ±%.0f°\n",
-                GAIN, ACC_GAIN, MOTOR_KP, MOTOR_KD, LIMIT_DEG);
+                GAIN, ACC_GAIN, KP_PITCH, KD_PITCH, LIMIT_DEG);
 }
 
 
@@ -629,10 +668,32 @@ float slew(float target, float prev, float maxStep) {
   return prev + d;
 }
 
+/* 게인을 바꿀 때마다 두 축을 함께 찍는다. 한쪽만 올리고 다른 쪽을 잊는 것이
+ * 이 구조에서 가장 하기 쉬운 실수라서, 항상 나란히 보여준다.
+ */
+void reportKp() {
+  float tp = KP_PITCH * LIMIT_DEG * DEG_TO_RAD;
+  float tr = KP_ROLL  * LIMIT_DEG * DEG_TO_RAD;
+  Serial.printf(">>> Kp  안쪽 %.2f  바깥 %.2f  [N/rad]\n", KP_PITCH, KP_ROLL);
+  Serial.printf("    %.0f도 오차에서 토크  안쪽 %.2f  바깥 %.2f N·m\n", LIMIT_DEG, tp, tr);
+  if (tp > TORQUE_WARN || tr > TORQUE_WARN)
+    Serial.printf("    !! %.1f N·m 초과 — 목표가 튀면 그만큼 나갑니다\n", TORQUE_WARN);
+}
+
+void reportKd(float changed) {
+  Serial.printf(">>> Kd  안쪽 %.3f  바깥 %.3f  [N·s/rad]\n", KD_PITCH, KD_ROLL);
+  if (changed == 0.0f) Serial.println("    !! Kd=0 은 매뉴얼상 발진·폭주 조건입니다");
+  /* Kp 를 올리면 감쇠비가 sqrt(Kp) 만큼 떨어진다. 같이 안 올리면 발진한다. */
+  if (KP_ROLL > 3.0f && KD_ROLL < 0.17f)
+    Serial.println("    !! 바깥축 Kp 대비 Kd 가 낮습니다 (1.75Hz 한계진동 이력)");
+}
+
 void printStatus() {
-  Serial.printf("[상태] %s  GAIN=%.2f  Kp=%.1f Kd=%.2f  DIR(p/r)=%+.0f/%+.0f  IMU=%s\n",
-                armed ? "ARMED" : "STOP", GAIN, MOTOR_KP, MOTOR_KD,
+  Serial.printf("[상태] %s  GAIN=%.2f  DIR(p/r)=%+.0f/%+.0f  IMU=%s\n",
+                armed ? "ARMED" : "STOP", GAIN,
                 DIR_PITCH, DIR_ROLL, imu_ok ? "OK" : "FAULT");
+  Serial.printf("       Kp 안쪽 %.2f / 바깥 %.2f    Kd 안쪽 %.3f / 바깥 %.3f\n",
+                KP_PITCH, KP_ROLL, KD_PITCH, KD_ROLL);
   Serial.printf("       ACC_GAIN=%.2f  DIR_ACC=%+.0f  ACC_LPF=%.2f   ref(p/r)=%.2f/%.2f\n",
                 ACC_GAIN, DIR_ACC, ACC_LPF, ref_pitch, ref_roll);
   Serial.printf("       pitch=%.2f roll=%.2f  cmd(p/r)=%.2f/%.2f  act(p/r)=%.2f/%.2f\n",
@@ -695,8 +756,8 @@ void motorSweep() {
                 SWEEP_DEG, SWEEP_RATE);
   broadcastUniversal(0xFB);  delay(50);
   broadcastUniversal(0xFE);  delay(50);
-  sendMIT(CAN_ID_PITCH, 0, 0, MOTOR_KP, MOTOR_KD, 0);
-  sendMIT(CAN_ID_ROLL,  0, 0, MOTOR_KP, MOTOR_KD, 0);
+  sendMIT(CAN_ID_PITCH, 0, 0, KP_PITCH, KD_PITCH, 0);
+  sendMIT(CAN_ID_ROLL,  0, 0, KP_ROLL,  KD_ROLL,  0);
   delay(50);
   broadcastUniversal(0xFC);  delay(100);
 
@@ -710,15 +771,15 @@ void motorSweep() {
     if (p >=  SWEEP_DEG) { p =  SWEEP_DEG; dir = -1; }
     if (p <= -SWEEP_DEG) { p = -SWEEP_DEG; dir = +1; }
 
-    sendMIT(CAN_ID_PITCH, p * DEG_TO_RAD, 0, MOTOR_KP, MOTOR_KD, 0);
-    sendMIT(CAN_ID_ROLL,  p * DEG_TO_RAD, 0, MOTOR_KP, MOTOR_KD, 0);
+    sendMIT(CAN_ID_PITCH, p * DEG_TO_RAD, 0, KP_PITCH, KD_PITCH, 0);
+    sendMIT(CAN_ID_ROLL,  p * DEG_TO_RAD, 0, KP_ROLL,  KD_ROLL,  0);
     drainCAN();
     delay(20);
   }
   while (fabsf(p) > 0.5f) {           // 기울어진 채로 끄지 않는다
     p += (p > 0 ? -0.4f : 0.4f);
-    sendMIT(CAN_ID_PITCH, p * DEG_TO_RAD, 0, MOTOR_KP, MOTOR_KD, 0);
-    sendMIT(CAN_ID_ROLL,  p * DEG_TO_RAD, 0, MOTOR_KP, MOTOR_KD, 0);
+    sendMIT(CAN_ID_PITCH, p * DEG_TO_RAD, 0, KP_PITCH, KD_PITCH, 0);
+    sendMIT(CAN_ID_ROLL,  p * DEG_TO_RAD, 0, KP_ROLL,  KD_ROLL,  0);
     delay(20);
   }
   broadcastUniversal(0xFD);
@@ -750,22 +811,35 @@ void handleLine(const char *raw) {
     ctrlSend(4);
   } else if (u == "t") {
     ctrlBusy = true;  if (!ctrlSend(3)) ctrlBusy = false;   // 8초 파서 정지
-  } else if (u.startsWith("kp")) {          // kd 보다 먼저 검사
+  /* kpp/kpr/kdp/kdr 은 kp/kd 보다 반드시 먼저 검사한다.
+   * ag 를 g 보다 먼저 보는 것과 같은 이유로, 순서가 뒤바뀌면 "kpr6" 이
+   * kp 접두에 걸려 substring(2)="r6" -> toFloat()=0 으로 조용히 먹힌다.
+   */
+  } else if (u.startsWith("kpp") || u.startsWith("kpr")) {
+    bool isP = u.startsWith("kpp");
+    float v = s.substring(3).toFloat();
+    if (v >= KP_MIN && v <= KP_MAX) {
+      if (isP) KP_PITCH = v; else KP_ROLL = v;
+      reportKp();
+    } else Serial.printf("!! Kp 범위 %.0f ~ %.0f\n", KP_MIN, KP_MAX);
+  } else if (u.startsWith("kdp") || u.startsWith("kdr")) {
+    bool isP = u.startsWith("kdp");
+    float v = s.substring(3).toFloat();
+    if (v >= KD_MIN && v <= KD_MAX) {
+      if (isP) KD_PITCH = v; else KD_ROLL = v;
+      reportKd(v);
+    } else Serial.printf("!! Kd 범위 %.0f ~ %.0f\n", KD_MIN, KD_MAX);
+  } else if (u.startsWith("kp")) {          // 두 축 함께. kd 보다 먼저 검사
     float v = s.substring(2).toFloat();
     if (v >= KP_MIN && v <= KP_MAX) {
-      MOTOR_KP = v;
-      float tmax = MOTOR_KP * LIMIT_DEG * DEG_TO_RAD;
-      Serial.printf(">>> Kp = %.1f N/rad  (%.0f° 오차에서 %.2f N·m)\n",
-                    MOTOR_KP, LIMIT_DEG, tmax);
-      if (tmax > TORQUE_WARN)
-        Serial.printf("   !! %.1f N·m 초과 — 목표가 튀면 그만큼 나갑니다\n", TORQUE_WARN);
+      KP_PITCH = v;  KP_ROLL = v;
+      reportKp();
     } else Serial.printf("!! Kp 범위 %.0f ~ %.0f\n", KP_MIN, KP_MAX);
-  } else if (u.startsWith("kd")) {
+  } else if (u.startsWith("kd")) {          // 두 축 함께
     float v = s.substring(2).toFloat();
     if (v >= KD_MIN && v <= KD_MAX) {
-      MOTOR_KD = v;
-      Serial.printf(">>> Kd = %.2f N·s/rad\n", MOTOR_KD);
-      if (v == 0.0f) Serial.println("   !! Kd=0 은 매뉴얼상 발진·폭주 조건입니다");
+      KD_PITCH = v;  KD_ROLL = v;
+      reportKd(v);
     } else Serial.printf("!! Kd 범위 %.0f ~ %.0f\n", KD_MIN, KD_MAX);
   } else if (u.startsWith("ag")) {          // g 보다 먼저 검사할 것
     float v = s.substring(2).toFloat();
@@ -934,7 +1008,9 @@ void setup() {
   Serial.printf ("  ag<값>  합력 게인     예) ag0.3   현재 %.2f%s\n",
                  ACC_GAIN, ACC_GAIN == 0.0f ? "  ← 0 이면 1단계와 동일" : "");
   Serial.println("  ad<값>  합력 필터     예) ad0.2");
-  Serial.println("  kp<값>  모터 강성     kd<값>  모터 감쇠");
+  Serial.println("  kp<값>  모터 강성     kd<값>  모터 감쇠   (두 축 함께)");
+  Serial.printf ("  kpp/kpr kdp/kdr 축별   현재 Kp %.2f/%.2f  Kd %.3f/%.3f (안/바깥)\n",
+                 KP_PITCH, KP_ROLL, KD_PITCH, KD_ROLL);
   Serial.println("  f<값>   지령 필터     d<값>   CAN 분주     ?  상태");
   Serial.printf ("  r<값>   슬루 제한     예) r120    현재 %.0f °/s\n", MAX_RATE);
   Serial.printf ("  zv1/zv0 ZV 켜기/끄기  zf<값> 주파수  zd<값> 감쇠비  zm<2|3>\n");
@@ -1181,7 +1257,7 @@ void ctrlTask(void *arg) {
         motorsDisarm("센서 리셋");
       }
       qprintf("[stat] %s Kp=%.1f Kd=%.2f 모터P=%s R=%s 피드백:%lu | 무보정:%lu/%lu I2C오류:%lu\n",
-                    armed ? "ARMED" : "STOP", MOTOR_KP, MOTOR_KD,
+                    armed ? "ARMED" : "STOP", KP_PITCH, KD_PITCH,
                     statusName(last_status[CAN_ID_PITCH & 0x03]),
                     statusName(last_status[CAN_ID_ROLL  & 0x03]),
                     fb_count, err_win, n_win, i2c_err);

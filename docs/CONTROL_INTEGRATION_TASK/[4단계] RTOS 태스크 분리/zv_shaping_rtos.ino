@@ -811,33 +811,45 @@ void canPinTest() {
   twai_stop();
   twai_driver_uninstall();
 
-  pinMode(5, INPUT);
-  pinMode(4, OUTPUT);
+  /* 두 방향을 다 해본다. 배선을 만지지 않고 TX/RX 뒤바뀜을 잡을 수 있다.
+   * GPIO4->RXD, GPIO5->TXD 로 뒤바뀌어 있으면 정방향 시험에서는 트랜시버의
+   * 출력 핀을 누르고 입력 핀을 읽는 셈이라 RX 가 계속 HIGH 로 보인다.
+   */
+  int best = -1;
+  for (int dir = 0; dir < 2; dir++) {
+    int txp = (dir == 0) ? 4 : 5;
+    int rxp = (dir == 0) ? 5 : 4;
 
-  digitalWrite(4, HIGH); delay(3);
-  int rec1 = digitalRead(5);
-  digitalWrite(4, LOW);  delay(3);
-  int dom  = digitalRead(5);
-  digitalWrite(4, HIGH); delay(3);
-  int rec2 = digitalRead(5);
+    pinMode(rxp, INPUT);
+    pinMode(txp, OUTPUT);
 
-  Serial.printf("    TX=HIGH -> RX=%d@@", rec1);
-  Serial.printf("    TX=LOW  -> RX=%d@@", dom);
-  Serial.printf("    TX=HIGH -> RX=%d@@", rec2);
+    digitalWrite(txp, HIGH); delay(3);
+    int rec1 = digitalRead(rxp);
+    digitalWrite(txp, LOW);  delay(3);
+    int dom  = digitalRead(rxp);
+    digitalWrite(txp, HIGH); delay(3);
+    int rec2 = digitalRead(rxp);
+    digitalWrite(txp, HIGH);
 
-  if (rec1 == 1 && dom == 0 && rec2 == 1) {
-    Serial.println("    OK: 트랜시버가 TX 를 따라온다. 칩과 3.3V 정상.");
-  } else if (rec1 == 1 && dom == 1) {
-    Serial.println("    NG: TX 를 내려도 버스가 안 내려간다.");
-    Serial.println("        GPIO4 -> 트랜시버 TXD 배선, 또는 트랜시버 송신부 불량.");
-  } else if (rec1 == 0 && dom == 0) {
-    Serial.println("    NG: RX 가 항상 LOW.");
-    Serial.println("        트랜시버 무전원(3.3V 확인), 또는 CANH-CANL 단락.");
-  } else {
-    Serial.println("    NG: 예상 밖 패턴. GPIO4/5 가 트랜시버 TXD/RXD 에 맞게");
-    Serial.println("        연결됐는지, 서로 바뀌지 않았는지 확인.");
+    Serial.printf("    TX=GPIO%d RX=GPIO%d : %d %d %d\n", txp, rxp, rec1, dom, rec2);
+    if (rec1 == 1 && dom == 0 && rec2 == 1) best = dir;
+
+    pinMode(txp, INPUT);      // 다음 방향을 시험하기 전에 놓아준다
   }
-  digitalWrite(4, HIGH);
+
+  if (best == 0) {
+    Serial.println("    OK: 정방향(GPIO4=TX)에서 RX 가 TX 를 따라온다. 트랜시버 정상.");
+  } else if (best == 1) {
+    Serial.println("    ★ TX/RX 가 뒤바뀌어 있다. GPIO5 가 TXD, GPIO4 가 RXD 에 물렸다.");
+    Serial.println("      배선을 바꾸거나 코드의 CAN_TX_PIN/CAN_RX_PIN 을 맞바꿀 것.");
+  } else {
+    Serial.println("    NG: 어느 방향으로도 RX 가 TX 를 따라오지 않는다.");
+    Serial.println("      1) 트랜시버 Rs(S/STB/EN) 핀이 GND 에 물렸는지 — 안 물리면");
+    Serial.println("         대기모드가 되어 수신만 되고 송신이 안 된다. 가장 흔한 원인.");
+    Serial.println("      2) GPIO4 -> TXD 선 접촉");
+    Serial.println("      3) 트랜시버 불량");
+    Serial.println("      RX 가 1 로 읽히므로 트랜시버 전원(3.3V)은 들어와 있다.");
+  }
 }
 
 void canSelfTest() {

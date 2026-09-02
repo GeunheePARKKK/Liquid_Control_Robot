@@ -815,6 +815,19 @@ void canPinTest() {
    * GPIO4->RXD, GPIO5->TXD 로 뒤바뀌어 있으면 정방향 시험에서는 트랜시버의
    * 출력 핀을 누르고 입력 핀을 읽는 셈이라 RX 가 계속 HIGH 로 보인다.
    */
+  /* 먼저 ESP32 핀 자체를 배제한다. 구동한 값이 그 핀에서 다시 읽히지 않으면
+   * 외부가 붙잡고 있거나 핀이 손상된 것이다. 그러면 배선을 봐도 답이 없다.
+   */
+  for (int pin = 4; pin <= 5; pin++) {
+    pinMode(pin, OUTPUT);
+    digitalWrite(pin, LOW);  delay(2);  int lo = digitalRead(pin);
+    digitalWrite(pin, HIGH); delay(2);  int hi = digitalRead(pin);
+    pinMode(pin, INPUT);     delay(2);  int fl = digitalRead(pin);
+    Serial.printf("    GPIO%d 구동 LOW->%d HIGH->%d  놓으면->%d\n", pin, lo, hi, fl);
+    if (lo != 0 || hi != 1)
+      Serial.printf("    ★ GPIO%d 이 구동값을 못 따라간다 — 외부 고정 또는 핀 손상\n", pin);
+  }
+
   int best = -1;
   for (int dir = 0; dir < 2; dir++) {
     int txp = (dir == 0) ? 4 : 5;

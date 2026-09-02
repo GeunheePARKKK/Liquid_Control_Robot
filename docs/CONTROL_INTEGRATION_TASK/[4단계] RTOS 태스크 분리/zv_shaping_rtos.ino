@@ -796,12 +796,54 @@ void canRecoverTick() {
  *
  * 끝나면 반드시 NORMAL 모드로 되돌린다.
  */
-void canSelfTest() {
-  motorsDisarm("CAN 자체 점검");
-  Serial.println(">>> CAN 자체 점검 — NO_ACK 모드로 자기 프레임 되돌림 확인");
-
+/* 핀 레벨 트랜시버 시험.  CAN 프로토콜도 모터도 거치지 않는다.
+ *
+ * 트랜시버는 TXD 가 LOW 면 버스를 우성(dominant)으로 끌고, RXD 로 그 버스를
+ * 되읽는다. 그래서 TWAI 를 떼고 핀을 직접 흔들면 칩 하나만 시험할 수 있다.
+ *
+ *   TX HIGH -> RX HIGH,  TX LOW -> RX LOW   ->  트랜시버 정상
+ *   TX 를 LOW 로 내려도 RX 가 HIGH          ->  TX 가 버스에 도달하지 않는다
+ *   RX 가 항상 LOW                          ->  트랜시버 무전원, 또는 H/L 단락
+ *   RX 가 항상 HIGH 이고 변화 없음          ->  RX 선 미연결(플로팅) 가능
+ */
+void canPinTest() {
+  Serial.println(">>> 핀 레벨 트랜시버 시험 (TWAI 해제)");
   twai_stop();
   twai_driver_uninstall();
+
+  pinMode(5, INPUT);
+  pinMode(4, OUTPUT);
+
+  digitalWrite(4, HIGH); delay(3);
+  int rec1 = digitalRead(5);
+  digitalWrite(4, LOW);  delay(3);
+  int dom  = digitalRead(5);
+  digitalWrite(4, HIGH); delay(3);
+  int rec2 = digitalRead(5);
+
+  Serial.printf("    TX=HIGH -> RX=%d@@", rec1);
+  Serial.printf("    TX=LOW  -> RX=%d@@", dom);
+  Serial.printf("    TX=HIGH -> RX=%d@@", rec2);
+
+  if (rec1 == 1 && dom == 0 && rec2 == 1) {
+    Serial.println("    OK: 트랜시버가 TX 를 따라온다. 칩과 3.3V 정상.");
+  } else if (rec1 == 1 && dom == 1) {
+    Serial.println("    NG: TX 를 내려도 버스가 안 내려간다.");
+    Serial.println("        GPIO4 -> 트랜시버 TXD 배선, 또는 트랜시버 송신부 불량.");
+  } else if (rec1 == 0 && dom == 0) {
+    Serial.println("    NG: RX 가 항상 LOW.");
+    Serial.println("        트랜시버 무전원(3.3V 확인), 또는 CANH-CANL 단락.");
+  } else {
+    Serial.println("    NG: 예상 밖 패턴. GPIO4/5 가 트랜시버 TXD/RXD 에 맞게");
+    Serial.println("        연결됐는지, 서로 바뀌지 않았는지 확인.");
+  }
+  digitalWrite(4, HIGH);
+}
+
+void canSelfTest() {
+  motorsDisarm("CAN 자체 점검");
+  canPinTest();
+  Serial.println(">>> NO_ACK 모드로 자기 프레임 되돌림 확인");
 
   twai_general_config_t g = TWAI_GENERAL_CONFIG_DEFAULT(CAN_TX_PIN, CAN_RX_PIN,
                                                         TWAI_MODE_NO_ACK);
@@ -831,8 +873,9 @@ void canSelfTest() {
     }
     twai_status_info_t st;
     twai_get_status_info(&st);
-    Serial.printf("    전송 %d/5   되돌아옴 %d/5   TX에러 %lu\n",
-                  sent, got, (unsigned long)st.tx_error_counter);
+    Serial.printf("    sent %d/5\n", sent);
+    Serial.printf("    back %d/5\n", got);
+    Serial.printf("    tx_err %lu\n", (unsigned long)st.tx_error_counter);
     if (got > 0) {
       Serial.println("    ✅ ESP32·트랜시버·H/L 배선 정상.");
       Serial.println("       남은 원인은 드라이버 24V 전원 또는 ControlMode 다.");

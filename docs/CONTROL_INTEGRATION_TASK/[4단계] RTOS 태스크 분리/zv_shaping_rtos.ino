@@ -724,6 +724,56 @@ void reportKd(float changed) {
     Serial.println("    !! 바깥축 Kp 대비 Kd 가 낮습니다 (1.75Hz 한계진동 이력)");
 }
 
+/* CAN 버스 상태를 드라이버에서 직접 읽는다.
+ *
+ * "피드백 0회" 만으로는 원인을 못 가린다. twai_transmit() 은 큐에 넣기만
+ * 성공해도 ESP_OK 라 TX실패 가 0 이어도 버스가 죽어 있을 수 있다.
+ *
+ * CAN 은 듣고 있는 노드가 하나라도 있으면 ACK 를 낸다. 그래서 두 경우가
+ * 에러 카운터로 깔끔하게 갈린다.
+ *
+ *   배선·트랜시버 죽음 (ACK 없음)  ->  TX에러 255 까지 상승, BUS_OFF
+ *   드라이버 모드 불일치 (ACK 있음) ->  TX에러 0 유지, RUNNING, 피드백만 0
+ */
+const char* twaiStateName(twai_state_t st) {
+  switch (st) {
+    case TWAI_STATE_STOPPED:    return "STOPPED";
+    case TWAI_STATE_RUNNING:    return "RUNNING";
+    case TWAI_STATE_BUS_OFF:    return "BUS_OFF ★버스 끊김";
+    case TWAI_STATE_RECOVERING: return "RECOVERING";
+    default:                    return "미정의";
+  }
+}
+
+void printCanStatus() {
+  twai_status_info_t st;
+  if (twai_get_status_info(&st) != ESP_OK) {
+    Serial.println("[can] 상태 읽기 실패");
+    return;
+  }
+  Serial.printf("[can] %s  TX에러 %lu  RX에러 %lu  중재실패 %lu  버스에러 %lu\n",
+                twaiStateName(st.state),
+                (unsigned long)st.tx_error_counter,
+                (unsigned long)st.rx_error_counter,
+                (unsigned long)st.arb_lost_count,
+                (unsigned long)st.bus_error_count);
+  Serial.printf("      TX큐 %lu  RX큐 %lu  TX실패 %lu  RX누락 %lu\n",
+                (unsigned long)st.msgs_to_tx, (unsigned long)st.msgs_to_rx,
+                (unsigned long)st.tx_failed_count,
+                (unsigned long)st.rx_missed_count);
+
+  if (fb_count == 0) {
+    if (st.state == TWAI_STATE_BUS_OFF || st.tx_error_counter > 96) {
+      Serial.println("      → ACK 가 전혀 없다. 배선(CAN H/L)·종단저항·트랜시버 전원 확인");
+    } else if (st.state == TWAI_STATE_RUNNING && st.tx_error_counter == 0) {
+      Serial.println("      → 버스는 살아 있고 ACK 도 온다. 모터가 프레임을 무시하는 것이다.");
+      Serial.println("        드라이버 ControlMode 가 MIT(0) 인지, CAN ID 가 1/2 인지 확인");
+    } else {
+      Serial.println("      → 에러 카운터 상승 중. 배선 접촉 불량이 의심된다");
+    }
+  }
+}
+
 void printStatus() {
   Serial.printf("[상태] %s  GAIN=%.2f  DIR(p/r)=%+.0f/%+.0f  IMU=%s\n",
                 armed ? "ARMED" : "STOP", GAIN,
@@ -742,8 +792,9 @@ void printStatus() {
                 CAN_ID_PITCH, statusName(last_status[CAN_ID_PITCH & 0x03]),
                 CAN_ID_ROLL,  statusName(last_status[CAN_ID_ROLL  & 0x03]));
   if (fb_count == 0) {
-    Serial.println("       !! 피드백 0회 — ControlMode 가 MIT 인지, CAN 배선 확인");
+    Serial.println("       !! 피드백 0회 — 아래 [can] 줄로 원인을 가린다");
   }
+  printCanStatus();
 }
 
 void drainCAN() {

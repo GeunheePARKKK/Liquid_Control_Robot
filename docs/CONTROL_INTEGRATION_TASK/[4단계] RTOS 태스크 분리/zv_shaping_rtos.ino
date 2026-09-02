@@ -745,6 +745,43 @@ const char* twaiStateName(twai_state_t st) {
   }
 }
 
+/* 버스오프 복구.
+ *
+ * ESP32 TWAI 는 TX 에러가 255 를 넘으면 BUS_OFF 로 가고 **스스로 나오지
+ * 않는다.** twai_initiate_recovery() 를 부르고, 상태가 STOPPED 가 되면
+ * twai_start() 로 다시 올려야 한다. 이게 없으면 선을 고쳐도 재부팅 전까지
+ * 계속 죽어 있다. 실제로 그렇게 한 번 막혔다.
+ *
+ * 복구 자체도 버스가 정상이어야 끝난다 (11비트 recessive 를 128번 봐야 한다).
+ * 그래서 선이 아직 끊겨 있으면 RECOVERING 에 머문다 — 그 상태가 보이면
+ * 배선이 아직 안 고쳐진 것이다.
+ */
+uint32_t canRecoverTry = 0;
+bool     canWasOff     = false;
+
+void canRecoverTick() {
+  twai_status_info_t st;
+  if (twai_get_status_info(&st) != ESP_OK) return;
+
+  if (st.state == TWAI_STATE_BUS_OFF) {
+    if (!canWasOff) {
+      canWasOff = true;
+      Serial.printf("!! CAN BUS_OFF (TX에러 %lu) — 복구 시도. 배선을 확인하세요\n",
+                    (unsigned long)st.tx_error_counter);
+      motorsDisarm("CAN 버스오프");
+    }
+    canRecoverTry++;
+    twai_initiate_recovery();
+  } else if (st.state == TWAI_STATE_STOPPED) {
+    /* 복구가 끝나면 STOPPED 로 떨어진다. 다시 올려야 송수신이 된다. */
+    if (twai_start() == ESP_OK)
+      Serial.printf(">>> CAN 복구 완료 (시도 %lu회). arm 다시 하세요\n", canRecoverTry);
+    canWasOff = false;
+  } else if (st.state == TWAI_STATE_RUNNING) {
+    canWasOff = false;
+  }
+}
+
 void printCanStatus() {
   twai_status_info_t st;
   if (twai_get_status_info(&st) != ESP_OK) {
@@ -757,10 +794,11 @@ void printCanStatus() {
                 (unsigned long)st.rx_error_counter,
                 (unsigned long)st.arb_lost_count,
                 (unsigned long)st.bus_error_count);
-  Serial.printf("      TX큐 %lu  RX큐 %lu  TX실패 %lu  RX누락 %lu\n",
+  Serial.printf("      TX큐 %lu  RX큐 %lu  TX실패 %lu  RX누락 %lu  복구시도 %lu\n",
                 (unsigned long)st.msgs_to_tx, (unsigned long)st.msgs_to_rx,
                 (unsigned long)st.tx_failed_count,
-                (unsigned long)st.rx_missed_count);
+                (unsigned long)st.rx_missed_count,
+                (unsigned long)canRecoverTry);
 
   if (fb_count == 0) {
     if (st.state == TWAI_STATE_BUS_OFF || st.tx_error_counter > 96) {
@@ -1362,6 +1400,7 @@ void ctrlTask(void *arg) {
 
     if (millis() - lastCheck > 2000) {
       lastCheck = millis();
+      canRecoverTick();     // 버스오프면 복구를 시도한다 (없으면 재부팅해야 한다)
       uint8_t c1 = readReg(REG_CTRL1_XL);
       if (c1 != CTRL1_XL_VAL) {
         err_reset++;

@@ -933,7 +933,7 @@ void canScanPins() {
   twai_stop();
   twai_driver_uninstall();
 
-  Serial.println(">>> CAN 핀 탐색 — 트랜시버가 붙은 핀 쌍을 찾는다");
+  Serial.println(">>> CAN 핀 탐색 — 읽기 핀에 풀업을 걸어 유령 쌍을 배제한다");
   Serial.printf("    후보 %d개:", N);
   for (int i = 0; i < N; i++) Serial.printf(" %d", CAND[i]);
   Serial.println();
@@ -941,7 +941,11 @@ void canScanPins() {
   int found = 0;
   for (int i = 0; i < N; i++) {
     int tx = CAND[i];
-    for (int j = 0; j < N; j++) if (j != i) pinMode(CAND[j], INPUT);
+    /* 풀업을 켜서 유령 쌍을 걸러낸다. 떠 있는 핀끼리의 용량 결합은 풀업에
+     * 져서 HIGH 로 남지만, 진짜 트랜시버 RXD 는 출력이라 전류를 빨아들여
+     * 풀업이 있어도 LOW 를 유지한다.
+     */
+    for (int j = 0; j < N; j++) if (j != i) pinMode(CAND[j], INPUT_PULLUP);
     pinMode(tx, OUTPUT);
 
     digitalWrite(tx, HIGH); delay(3);
@@ -952,7 +956,7 @@ void canScanPins() {
       if (j == i) continue;
       int lo = digitalRead(CAND[j]);
       if (hi[j] == 1 && lo == 0) {
-        Serial.printf("    ★ TX=GPIO%d 를 내리면 GPIO%d 가 따라 내려온다\n", tx, CAND[j]);
+        Serial.printf("    TX=GPIO%d -> RX=GPIO%d 따라옴 (풀업 이김)\n", tx, CAND[j]);
         found++;
       }
     }

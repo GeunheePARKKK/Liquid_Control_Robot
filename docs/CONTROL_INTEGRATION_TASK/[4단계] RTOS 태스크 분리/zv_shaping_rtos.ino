@@ -865,6 +865,57 @@ void canPinTest() {
   }
 }
 
+/* TXD 를 붙잡아 두고 멀티미터로 재게 한다.
+ *
+ * ct 는 3ms 마다 토글해서 계측기로는 못 읽는다. 우성 상태를 유지시켜 놓으면
+ * 트랜시버가 버스를 실제로 구동하는지 전압으로 확인할 수 있다.
+ *
+ *   정상   CANH 약 3.3V,  CANL 약 0V,  차이 2V 이상
+ *   불량   CANH ~= CANL   (차이 0.2V 이하)  -> 버스를 못 구동한다
+ *                                              대기모드(Rs) 또는 칩 불량
+ *
+ * 열성 상태(TXD HIGH)도 함께 재두면 비교가 된다. 열성에서는 둘 다 중간전압
+ * (3.3V 트랜시버면 약 1.6~2.5V)으로 붙어 있어야 한다.
+ */
+void canHold(bool dominant, int seconds) {
+  motorsDisarm("CAN 전압 측정");
+  twai_stop();
+  twai_driver_uninstall();
+
+  pinMode(4, OUTPUT);
+  digitalWrite(4, dominant ? LOW : HIGH);
+  pinMode(5, INPUT);
+
+  Serial.printf(">>> TXD = %s (%s) — %d초간 유지\n",
+                dominant ? "LOW" : "HIGH",
+                dominant ? "우성 dominant" : "열성 recessive", seconds);
+  Serial.println("    지금 재세요:  트랜시버 VCC / CANH-GND / CANL-GND / CANH-CANL");
+  if (dominant) {
+    Serial.println("    정상이면  CANH ~3.3V,  CANL ~0V,  차이 2V 이상");
+    Serial.println("    차이가 0.2V 이하면 트랜시버가 버스를 못 구동하는 것");
+  } else {
+    Serial.println("    정상이면  CANH ~= CANL ~= 1.6~2.5V (둘이 붙어 있어야 한다)");
+  }
+
+  for (int i = seconds; i > 0; i--) {
+    Serial.printf("    %d\n", i);
+    delay(1000);
+    if (Serial.available()) { Serial.println("    중단"); break; }
+  }
+
+  digitalWrite(4, HIGH);
+  pinMode(4, INPUT);
+  twai_general_config_t g = TWAI_GENERAL_CONFIG_DEFAULT(CAN_TX_PIN, CAN_RX_PIN,
+                                                        TWAI_MODE_NORMAL);
+  twai_timing_config_t  t = TWAI_TIMING_CONFIG_1MBITS();
+  twai_filter_config_t  f = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+  twai_driver_install(&g, &t, &f);
+  twai_start();
+  fb_count = 0;
+  canWasOff = false;
+  Serial.println(">>> NORMAL 모드로 복귀");
+}
+
 void canSelfTest() {
   motorsDisarm("CAN 자체 점검");
   canPinTest();
@@ -1078,6 +1129,10 @@ void handleLine(const char *raw) {
     ctrlSend(2);
   } else if (u == "z") {
     ctrlSend(4);
+  } else if (u == "cd") {          // dominant 유지 — ct 보다 먼저 검사할 필요 없음
+    ctrlBusy = true;  canHold(true,  15);  ctrlBusy = false;
+  } else if (u == "cr") {          // recessive 유지
+    ctrlBusy = true;  canHold(false, 15);  ctrlBusy = false;
   } else if (u == "ct") {
     ctrlBusy = true;
     canSelfTest();
@@ -1284,6 +1339,7 @@ void setup() {
   Serial.println("  arm     활성화        stop  비활성화");
   Serial.println("  t       시험 구동     z     영점 재설정");
   Serial.println("  ct      CAN 자체 점검 (모터 배제, 트랜시버까지만 확인)");
+  Serial.println("  cd / cr TXD 를 우성/열성으로 15초 유지 — 멀티미터 측정용");
   Serial.println("  g<값>   수평 게인     예) g1.0");
   Serial.printf ("  ag<값>  합력 게인     예) ag0.3   현재 %.2f%s\n",
                  ACC_GAIN, ACC_GAIN == 0.0f ? "  ← 0 이면 1단계와 동일" : "");

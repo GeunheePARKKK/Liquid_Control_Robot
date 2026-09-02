@@ -782,6 +782,80 @@ void canRecoverTick() {
   }
 }
 
+/* CAN 자체 점검.  모터를 배제하고 ESP32 + 트랜시버 구간만 본다.
+ *
+ * NO_ACK 모드는 ACK 를 요구하지 않고 보낸다. 그래서 버스에 듣는 노드가
+ * 하나도 없어도 버스오프로 가지 않는다. 그리고 트랜시버가 정상이면 자기가
+ * 보낸 프레임이 버스를 타고 RX 로 되돌아온다 (TX 는 버스를 구동하고 RX 는
+ * 그 버스를 읽으므로).
+ *
+ *   프레임이 돌아온다  ->  ESP32 + 트랜시버 + H/L 배선까지 정상.
+ *                         남은 원인은 드라이버 전원 또는 ControlMode 다.
+ *   안 돌아온다        ->  ESP32↔트랜시버 구간(GPIO4/5) 또는 트랜시버 자체.
+ *                         모터는 무죄다.
+ *
+ * 끝나면 반드시 NORMAL 모드로 되돌린다.
+ */
+void canSelfTest() {
+  motorsDisarm("CAN 자체 점검");
+  Serial.println(">>> CAN 자체 점검 — NO_ACK 모드로 자기 프레임 되돌림 확인");
+
+  twai_stop();
+  twai_driver_uninstall();
+
+  twai_general_config_t g = TWAI_GENERAL_CONFIG_DEFAULT(CAN_TX_PIN, CAN_RX_PIN,
+                                                        TWAI_MODE_NO_ACK);
+  twai_timing_config_t  tc = TWAI_TIMING_CONFIG_1MBITS();
+  twai_filter_config_t  fc = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+  bool ok = (twai_driver_install(&g, &tc, &fc) == ESP_OK) && (twai_start() == ESP_OK);
+  if (!ok) {
+    Serial.println("!! NO_ACK 모드 설치 실패");
+  } else {
+    delay(20);
+    twai_message_t rx;
+    while (twai_receive(&rx, 0) == ESP_OK) { }      // 묵은 프레임 비우기
+
+    int sent = 0, got = 0;
+    for (int i = 0; i < 5; i++) {
+      twai_message_t m = {};
+      m.identifier = 0x7FF;            // 모터가 쓰지 않는 ID
+      m.data_length_code = 1;
+      m.data[0] = (uint8_t)i;
+      if (twai_transmit(&m, pdMS_TO_TICKS(20)) == ESP_OK) sent++;
+      uint32_t t0 = millis();
+      while (millis() - t0 < 40) {
+        if (twai_receive(&rx, pdMS_TO_TICKS(5)) == ESP_OK) {
+          if (rx.identifier == 0x7FF) { got++; break; }
+        }
+      }
+    }
+    twai_status_info_t st;
+    twai_get_status_info(&st);
+    Serial.printf("    전송 %d/5   되돌아옴 %d/5   TX에러 %lu\n",
+                  sent, got, (unsigned long)st.tx_error_counter);
+    if (got > 0) {
+      Serial.println("    ✅ ESP32·트랜시버·H/L 배선 정상.");
+      Serial.println("       남은 원인은 드라이버 24V 전원 또는 ControlMode 다.");
+    } else {
+      Serial.println("    ❌ 자기 프레임이 안 돌아온다.");
+      Serial.println("       GPIO4(TX)/GPIO5(RX) 배선, 트랜시버 3.3V, 트랜시버 불량 순으로 확인.");
+      Serial.println("       모터는 이 결과와 무관하다.");
+    }
+  }
+
+  twai_stop();
+  twai_driver_uninstall();
+  twai_general_config_t g2 = TWAI_GENERAL_CONFIG_DEFAULT(CAN_TX_PIN, CAN_RX_PIN,
+                                                         TWAI_MODE_NORMAL);
+  twai_timing_config_t  t2 = TWAI_TIMING_CONFIG_1MBITS();
+  twai_filter_config_t  f2 = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+  twai_driver_install(&g2, &t2, &f2);
+  twai_start();
+  fb_count = 0;
+  canWasOff = false;
+  Serial.println(">>> NORMAL 모드로 복귀");
+}
+
 void printCanStatus() {
   twai_status_info_t st;
   if (twai_get_status_info(&st) != ESP_OK) {
@@ -936,6 +1010,10 @@ void handleLine(const char *raw) {
     ctrlSend(2);
   } else if (u == "z") {
     ctrlSend(4);
+  } else if (u == "ct") {
+    ctrlBusy = true;
+    canSelfTest();
+    ctrlBusy = false;
   } else if (u == "t") {
     ctrlBusy = true;  if (!ctrlSend(3)) ctrlBusy = false;   // 8초 파서 정지
   /* kpp/kpr/kdp/kdr 은 kp/kd 보다 반드시 먼저 검사한다.
@@ -1137,6 +1215,7 @@ void setup() {
   Serial.println("--------------------------------------------------");
   Serial.println("  arm     활성화        stop  비활성화");
   Serial.println("  t       시험 구동     z     영점 재설정");
+  Serial.println("  ct      CAN 자체 점검 (모터 배제, 트랜시버까지만 확인)");
   Serial.println("  g<값>   수평 게인     예) g1.0");
   Serial.printf ("  ag<값>  합력 게인     예) ag0.3   현재 %.2f%s\n",
                  ACC_GAIN, ACC_GAIN == 0.0f ? "  ← 0 이면 1단계와 동일" : "");

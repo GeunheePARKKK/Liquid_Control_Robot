@@ -916,6 +916,68 @@ void canHold(bool dominant, int seconds) {
   Serial.println(">>> NORMAL 모드로 복귀");
 }
 
+/* 트랜시버가 실제로 어느 핀에 붙었는지 찾는다.
+ *
+ * 핀 하나를 구동하고 나머지를 전부 읽어서, 같이 움직이는 핀을 찾는다.
+ * 트랜시버가 붙어 있으면 TXD 를 내릴 때 RXD 가 따라 내려온다.
+ *
+ * ESP32-S3 에서 건드리면 안 되는 핀은 뺐다.
+ *   19/20 USB,  26~32 flash,  33~37 octal PSRAM,  43/44 UART0,
+ *   0/3/45/46 strapping,  38 RGB LED,  11/12 IMU I2C
+ */
+void canScanPins() {
+  static const int CAND[] = {1,2,4,5,6,7,8,9,10,13,14,15,16,17,18,21,39,40,41,42};
+  const int N = sizeof(CAND) / sizeof(CAND[0]);
+
+  motorsDisarm("CAN 핀 탐색");
+  twai_stop();
+  twai_driver_uninstall();
+
+  Serial.println(">>> CAN 핀 탐색 — 트랜시버가 붙은 핀 쌍을 찾는다");
+  Serial.printf("    후보 %d개:", N);
+  for (int i = 0; i < N; i++) Serial.printf(" %d", CAND[i]);
+  Serial.println();
+
+  int found = 0;
+  for (int i = 0; i < N; i++) {
+    int tx = CAND[i];
+    for (int j = 0; j < N; j++) if (j != i) pinMode(CAND[j], INPUT);
+    pinMode(tx, OUTPUT);
+
+    digitalWrite(tx, HIGH); delay(3);
+    int hi[32];
+    for (int j = 0; j < N; j++) hi[j] = (j == i) ? -1 : digitalRead(CAND[j]);
+    digitalWrite(tx, LOW);  delay(3);
+    for (int j = 0; j < N; j++) {
+      if (j == i) continue;
+      int lo = digitalRead(CAND[j]);
+      if (hi[j] == 1 && lo == 0) {
+        Serial.printf("    ★ TX=GPIO%d 를 내리면 GPIO%d 가 따라 내려온다\n", tx, CAND[j]);
+        found++;
+      }
+    }
+    digitalWrite(tx, HIGH); delay(2);
+    pinMode(tx, INPUT);
+  }
+
+  if (found == 0) {
+    Serial.println("    아무 쌍도 없다. 트랜시버가 후보 핀 어디에도 붙어 있지 않다.");
+    Serial.println("    → 트랜시버 모듈의 TXD/RXD 가 ESP32 에 실제로 연결됐는지,");
+    Serial.println("      그리고 모듈 VCC/GND 가 물렸는지 확인. 코드 핀 번호는 무죄다.");
+  } else {
+    Serial.printf("    쌍 %d개 발견. CAN_TX_PIN / CAN_RX_PIN 을 그 번호로 바꾸면 된다.\n", found);
+  }
+
+  twai_general_config_t g = TWAI_GENERAL_CONFIG_DEFAULT(CAN_TX_PIN, CAN_RX_PIN,
+                                                        TWAI_MODE_NORMAL);
+  twai_timing_config_t  t = TWAI_TIMING_CONFIG_1MBITS();
+  twai_filter_config_t  f = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+  twai_driver_install(&g, &t, &f);
+  twai_start();
+  fb_count = 0;  canWasOff = false;
+  Serial.println(">>> NORMAL 모드로 복귀");
+}
+
 void canSelfTest() {
   motorsDisarm("CAN 자체 점검");
   canPinTest();
@@ -1129,6 +1191,8 @@ void handleLine(const char *raw) {
     ctrlSend(2);
   } else if (u == "z") {
     ctrlSend(4);
+  } else if (u == "cs") {          // 핀 탐색
+    ctrlBusy = true;  canScanPins();  ctrlBusy = false;
   } else if (u == "cd") {          // dominant 유지 — ct 보다 먼저 검사할 필요 없음
     ctrlBusy = true;  canHold(true,  15);  ctrlBusy = false;
   } else if (u == "cr") {          // recessive 유지
@@ -1340,6 +1404,7 @@ void setup() {
   Serial.println("  t       시험 구동     z     영점 재설정");
   Serial.println("  ct      CAN 자체 점검 (모터 배제, 트랜시버까지만 확인)");
   Serial.println("  cd / cr TXD 를 우성/열성으로 15초 유지 — 멀티미터 측정용");
+  Serial.println("  cs      CAN 핀 탐색 — 트랜시버가 붙은 핀 쌍을 찾는다");
   Serial.println("  g<값>   수평 게인     예) g1.0");
   Serial.printf ("  ag<값>  합력 게인     예) ag0.3   현재 %.2f%s\n",
                  ACC_GAIN, ACC_GAIN == 0.0f ? "  ← 0 이면 1단계와 동일" : "");

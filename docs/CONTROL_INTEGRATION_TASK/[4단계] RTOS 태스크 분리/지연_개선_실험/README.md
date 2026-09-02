@@ -18,8 +18,14 @@ ZV는 전 시험에서 껐다.
 | `tools/check_tuning.py` | 드룹·슬루·지연·추종률·정지 떨림을 계산한다 |
 | `logs/` | 이 문서의 판단에 사용한 원본 로그 15개 |
 | `requirements.txt` | PC 분석 도구 의존성 |
+| [`soft_return_rtos.ino`](soft_return_rtos.ino) | 가속 종료 HOLD·최소저크 복귀를 추가한 실험 펌웨어 |
+| [`소프트_복귀_제어.md`](%EC%86%8C%ED%94%84%ED%8A%B8_%EB%B3%B5%EA%B7%80_%EC%A0%9C%EC%96%B4.md) | 로직·명령·안전·실험 및 판정 방법 |
 
 `capture.py`와 `check_tuning.py`는 실험 당시 사용한 버전을 그대로 보존했다.
+
+`soft_return_rtos.ino`는 아래 지연 개선 결과 뒤에 추가한 후속 실험 코드다. 기존
+15개 로그와 `결과_분석.md`의 수치는 모두 소프트 복귀를 사용하기 전 결과이며, 새 로직은
+아직 액체 실험으로 검증되지 않았다.
 
 ## 실험 환경
 
@@ -139,6 +145,21 @@ python capture.py --port COM8 `
 | `kpp/kdp` | 안쪽 PITCH 게인 |
 | `kpr/kdr` | 바깥 ROLL 게인 |
 
+### 소프트 복귀 후속 실험
+
+가속 종료 때 남은 합력 목표각을 잠시 유지한 뒤 최소저크 곡선으로 수평 복귀하는
+실험 버전은 `soft_return_rtos.ino`다. 상세 원리와 파라미터 범위는
+[`소프트_복귀_제어.md`](%EC%86%8C%ED%94%84%ED%8A%B8_%EB%B3%B5%EA%B7%80_%EC%A0%9C%EC%96%B4.md)를
+참고한다.
+
+```powershell
+python capture.py --port COM8 `
+  --cmd "zv0,sr1,sra1.5,sre0.75,srd30,srh100,srr120,vf1,ad0.20,f0.30,r120,d1,kpp2.0,kdp0.13,kpr2.0,kdr0.40,arm" `
+  --pre 6 --post 26 --out SOFT_RETURN_01.txt
+```
+
+기능은 기본 OFF이며 `sr1`로 켠다. `sr1`과 기존 `zv1`은 동시에 동작하지 않는다.
+
 ## 분석
 
 한 파일:
@@ -183,4 +204,3 @@ kpp2.0, kdp0.13, kpr2.0, kdr0.40
 
 이 값은 펌웨어 기본값으로 확정한 것이 아니다. 캡처 명령으로 적용한 현재 최선 후보다.
 ROLL은 여전히 `cmd→act` 약 85 ms, 추종률 약 1.4라 추가 검증이 필요하다.
-

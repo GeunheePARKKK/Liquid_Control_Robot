@@ -113,7 +113,7 @@
  *       관성이 커서 같은 Kp 로는 못 따라온다. kpr 을 올려 지연을 맞출 것.
  *       Kp 를 올리면 Kd 도 sqrt 비율로 같이 올려야 발진하지 않는다.
  *     dp / dr 회전 방향 뒤집기       ★ −1 / +1  토글        안쪽 / 바깥
- *     ff1/ff0 모터 피드포워드        ★ 꺼짐                  v_des=θ̇cmd, t_ff=J·θ̈cmd
+ *     ff1/ff0 모터 피드포워드        ★ 켜짐                  실측 확정. ff0 이면 모터 70ms 로 돌아간다
  *     fj<값>  안쪽 관성 J [kg·m²]     ★ 0.0038   0 ~ 0.1     실측 (Kp4 로그 3개)
  *     fjr<값> 바깥 관성 J             ★ 0        0 ~ 0.1     미측정. 0 이면 v_des 만
  *
@@ -257,7 +257,7 @@ const float TORQUE_WARN = 3.0f;
  * 바깥축 J 는 아직 안 쟀다. 0 으로 두어 v_des 만 적용된다.
  * t_ff 는 ±FF_TMAX 로 자른다. 슬루 켜지고 꺼지는 순간 θ̈ 가 튈 수 있다.
  */
-volatile bool  FF_ON       = false;    // [ff]  기본 꺼짐. ff1 로 켠다
+volatile bool  FF_ON       = true;     // [ff]  실측 확정 켜짐. 모터 지연 70→25ms, 떨림 변화 없음 (2026-09-04)
 volatile float FF_J_PITCH  = 0.0038f;  // [fj]  안쪽 관성 [kg·m²]  실측
 volatile float FF_J_ROLL   = 0.0f;     // [fjr] 바깥 관성. 미측정 → 0
 const float    FF_TMAX     = 1.5f;     // t_ff 상한 [N·m]

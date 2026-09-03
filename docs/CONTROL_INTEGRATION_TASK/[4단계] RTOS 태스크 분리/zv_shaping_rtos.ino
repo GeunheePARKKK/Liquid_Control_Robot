@@ -377,10 +377,25 @@ const float T_MIN  = -10.0f, T_MAX  =  10.0f;
 #define REG_CTRL1_XL   0x10
 #define REG_CTRL2_G    0x11
 #define REG_CTRL3_C    0x12
+#define REG_CTRL8_XL   0x17
 #define REG_OUTX_L_G   0x22
 
 #define WHO_AM_I_VAL   0x6C
-#define CTRL1_XL_VAL   0x68    // 416Hz, ±4g
+/* 가속도계 내부 LPF2 를 켠다 (2026-09-04).
+ *
+ * 416Hz 로 돌리면서 내부 필터 없이 100Hz 로 읽고 있었다. 대역이 208Hz 라
+ * 바퀴 충격·바닥 진동이 앨리어싱으로 접혀 들어와, raw 에 30ms 단발 ±45°
+ * 스파이크가 부호를 바꿔가며 찍혔다. 실제 밀기(8~10°)와 무관한 것인데
+ * ACC_LPF 가 그걸 막느라 무거워졌고(0.20), 그 대가로 진짜 가속의 진폭도
+ * 25% 깎였다.
+ *
+ * LPF2 차단 ODR/20 = 20.8Hz.  100Hz 샘플링의 나이퀴스트(50Hz) 아래로
+ * 넉넉히 두고, 슬로싱(2Hz)·제어 대역에는 지연 ~10ms 만 얹는다.
+ *   CTRL1_XL bit1 = LPF2_XL_EN
+ *   CTRL8_XL[7:5] = HPCF_XL = 010 → ODR/20
+ */
+#define CTRL1_XL_VAL   0x6A    // 416Hz, ±4g, LPF2 켬
+#define CTRL8_XL_VAL   0x40    // LPF2 차단 ODR/20 ≈ 20.8Hz
 #define CTRL2_G_VAL    0x6C    // 416Hz, ±2000dps
 #define CTRL3_C_VAL    0x44    // BDU=1, IF_INC=1
 
@@ -737,6 +752,7 @@ void configSensor() {
   writeReg(REG_CTRL3_C, 0x01);          // 소프트 리셋
   delay(50);
   writeReg(REG_CTRL3_C,  CTRL3_C_VAL);
+  writeReg(REG_CTRL8_XL, CTRL8_XL_VAL);  // LPF2 대역을 먼저 정하고 켠다
   writeReg(REG_CTRL1_XL, CTRL1_XL_VAL);
   writeReg(REG_CTRL2_G,  CTRL2_G_VAL);
   delay(100);

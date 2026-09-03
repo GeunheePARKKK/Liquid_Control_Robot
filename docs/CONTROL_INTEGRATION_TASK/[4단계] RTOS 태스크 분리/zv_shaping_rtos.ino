@@ -74,12 +74,12 @@
  *     ad<값>  3축 합력 벡터 필터     ★ 0.20     0 ~ 1       각도가 아니라 벡터를 거른다
  *
  *   지령 응답                        기본값      범위        올릴 때
- *     r<값>   슬루 제한 [°/s]        ★ 30       5 ~ 400     ag 가 안 먹으면 여기
- *     f<값>   지령 저역통과          ★ 0.15     0 ~ 1       클수록 빠르고 거칠다
- *     d<값>   CAN 분주               ★ 2        1 ~ 20      2 = 50Hz 전송
+ *     r<값>   슬루 제한 [°/s]        ★ 120      5 ~ 400     실측 0% 클리핑. 병목 아님
+ *     f<값>   지령 저역통과          ★ 0.30     0 ~ 1       실측 확정. 0.35 부터 3.85Hz 진동
+ *     d<값>   CAN 분주               ★ 1        1 ~ 20      1 = 100Hz 전송. 실측 확정
  *
  *   ZV 입력성형 (3단계)              기본값      범위        비고
- *     zv0 / zv1  끄기 / 켜기          ★ 꺼짐                 꺼두면 2단계와 동일
+ *     zv0 / zv1  끄기 / 켜기          ★ 켜짐                 zv0 이면 2단계와 동일
  *     zf<값>  슬로싱 주파수 [Hz]      ★ 2.40     0.8 ~ 8     ★ 실측해서 넣을 것
  *     zd<값>  감쇠비 ζ                ★ 0.02     0 ~ 0.9     액체는 보통 0.01~0.05
  *     zm<값>  임펄스 수               ★ 2        2 또는 3    2=ZV, 3=ZVD
@@ -106,8 +106,8 @@
  *   모터                             기본값      범위        올릴 때
  *     kp<값>  강성 — 두 축 함께      ★ 2.0      0 ~ 500     3 은 Kd 0 에서 발산했다
  *     kd<값>  감쇠 — 두 축 함께      ★ 0.13     0 ~ 5       0 은 매뉴얼상 금지
- *     kpp/kpr 강성 — 안쪽/바깥 따로  ★ 2.0/2.0              예) kpr6
- *     kdp/kdr 감쇠 — 안쪽/바깥 따로  ★ 0.13/0.13            예) kdr0.22
+ *     kpp/kpr 강성 — 안쪽/바깥 따로  ★ 4.0/2.0              안쪽 6 은 물이 요동. 4 가 상한
+ *     kdp/kdr 감쇠 — 안쪽/바깥 따로  ★ 0.20/0.13            예) kdr0.22
  *
  *       바깥축이 안쪽보다 81ms 느리다 (189 vs 108ms, 2026-09-01 실측).
  *       관성이 커서 같은 Kp 로는 못 따라온다. kpr 을 올려 지연을 맞출 것.
@@ -181,8 +181,8 @@ volatile float GAIN            = 1.0f;    // [g]  기본 1.00   완전 수평 �
 const float LIMIT_DEG = 25.0f;   //      기본 25°    지령 각도 상한 (명령 없음)
 volatile float MAX_RATE        = 120.0f;  // [r]  실측 확정 120  요구 변화율 p95 가 109~112
                                  //      30 이면 지령의 31% 가 잘려 ZV 성형이 무너진다
-volatile float CMD_LPF         = 0.15f;   // [f]  기본 0.15   클수록 빠르고 거칠다
-volatile int   CAN_DIV         = 2;       // [d]  기본 2      100Hz / 2 = 50Hz 전송
+volatile float CMD_LPF         = 0.30f;   // [f]  실측 확정 0.30  지연 40→15ms, 상관 0.99 유지 (2026-09-04)
+volatile int   CAN_DIV         = 1;       // [d]  실측 확정 1     100Hz 전송. 모터 지연 75→60ms (2026-09-04)
 
 /* 모터 임피던스 게인 — 실측값 (2026-08-27)
  *   Kp 1     트레이를 잡는다. Kp 3 은 Kd 0 에서 발산했다.
@@ -225,8 +225,8 @@ volatile int   CAN_DIV         = 2;       // [d]  기본 2      100Hz / 2 = 50Hz
  *   Kp 2.0   드룹 54~82% -> 90%
  *   Kd 0.13  Kd ~ sqrt(Kp+k), k=0.28. 떨림 0.010~0.018도로 여유 있음
  */
-volatile float KP_PITCH = 2.0f;    // [kpp] 안쪽 0x02
-volatile float KD_PITCH = 0.13f;   // [kdp]
+volatile float KP_PITCH = 4.0f;    // [kpp] 안쪽 0x02  실측 확정 4.0. 6 은 토크 계단으로 물이 요동 (2026-09-04)
+volatile float KD_PITCH = 0.20f;   // [kdp]           실측 확정 0.20. 더 올리면 엔코더 잡음이 토크로
 volatile float KP_ROLL  = 2.0f;    // [kpr] 바깥 0x01 — 올려야 할 쪽
 volatile float KD_ROLL  = 0.13f;   // [kdr]
 
@@ -306,7 +306,7 @@ AccelCorrectionGate accGateRoll  = {false, 0};
  *   주파수는 용기 형상과 액체 높이에 따라 변하므로 실측해서 넣어야 한다.
  *     원통 1차 모드 :  w^2 = 1.841 (g/R) tanh(1.841 h/R)
  */
-volatile bool  ZV_ON   = false;      // [zv] 기본 꺼짐  ★ 꺼두면 2단계와 완전히 동일
+volatile bool  ZV_ON   = true;       // [zv] 기본 켜짐  ★ 실측 확정 (2026-09-04). zv0 이면 2단계와 동일
 volatile float ZV_FREQ = 2.40f;      // [zf] 기본 2.40Hz  ★ 실측값으로 바꿀 것
 volatile float ZV_ZETA = 0.02f;      // [zd] 기본 0.02    액체는 보통 0.01~0.05
 volatile int   ZV_MODE = 2;          // [zm] 기본 2       2=ZV, 3=ZVD

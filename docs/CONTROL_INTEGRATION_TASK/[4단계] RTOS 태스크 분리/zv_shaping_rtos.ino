@@ -116,9 +116,9 @@
  *
  *   코드에만 있는 값 (명령 없음)
  *     DIR_ACC        ★ +1     합력 목표각 부호. 실측 확정
- *     LIMIT_DEG      ★ 25°    지령 각도 상한
- *     ACC_REF_LIMIT  ★ 20°    합력 목표각 자체의 상한
- *     ACT_LIMIT_DEG  ★ 50°    실제 위치가 넘으면 폭주로 보고 끈다
+ *     LIMIT_DEG      ★ 45°    지령 각도 상한 (기구 한계)
+ *     ACC_REF_LIMIT  ★ 45°    합력 목표각 상한 = 1.0g. 20° 는 0.36g 에서 잘렸다
+ *     ACT_LIMIT_DEG  ★ 55°    실제 위치가 넘으면 폭주로 보고 끈다 (지령 상한 +10°)
  *
  * 값을 바꿔도 저장되지 않는다. 전원을 껐다 켜면 위 기본값으로 돌아온다.
  * 좋은 값을 찾으면 알려줄 것 — 코드의 기본값으로 박는다.
@@ -178,7 +178,7 @@ volatile float DIR_ROLL  = +1.0f;    // [dr] 기본 +1   바깥축 0x01
 
 // ── 제어 파라미터 ──
 volatile float GAIN            = 1.0f;    // [g]  기본 1.00   완전 수평 보상
-const float LIMIT_DEG = 25.0f;   //      기본 25°    지령 각도 상한 (명령 없음)
+const float LIMIT_DEG = 45.0f;   //      45°  지령 각도 상한. 기구 한계 45° (2026-09-04 확인)
 volatile float MAX_RATE        = 120.0f;  // [r]  실측 확정 120  요구 변화율 p95 가 109~112
                                  //      30 이면 지령의 31% 가 잘려 ZV 성형이 무너진다
 volatile float CMD_LPF         = 0.30f;   // [f]  실측 확정 0.30  지연 40→15ms, 상관 0.99 유지 (2026-09-04)
@@ -246,7 +246,11 @@ const float TORQUE_WARN = 3.0f;
 volatile float ACC_GAIN = 1.0f;      // [ag] 기본 1.00  ag0 으로 끄면 1단계와 동일
 volatile float DIR_ACC  = +1.0f;     //      기본 +1    실측 확정 (명령 없음)
 volatile float ACC_LPF  = 0.2f;      // [ad] 기본 0.20  ★ 3축 합력 벡터 전용
-const float ACC_REF_LIMIT = 20.0f;   //      기본 20°   θ_ref 상한 (명령 없음)
+/* 20° 는 0.36g 에서 잘렸다. 보통 리듬으로 밀 때도 raw 가 정확히 20.0 에 붙어
+ * 있었고(1.4~2.6%), 세게 밀면 트레이가 세기와 무관하게 거기서 멈췄다.
+ * 45° = 1.0g 까지 받는다. 기구 한계와 같다.
+ */
+const float ACC_REF_LIMIT = 45.0f;   //      45°   θ_ref 상한 (명령 없음)
 
 /* 합력 벡터를 성분 상태로 들고 있는다. 각도로 바꾼 뒤 거르지 않고, 벡터를
  * 거른 뒤 한 번만 각도로 바꾼다. 축별로 각도를 따로 거르면 두 축이 동시에
@@ -354,7 +358,8 @@ volatile bool srResetRequest = false;
 /* 폭주 차단 — 지령은 ±LIMIT_DEG 를 넘지 않으므로 실제 위치가 이 값을 넘으면
  * 우리가 시킨 움직임이 아니다.
  */
-const float ACT_LIMIT_DEG = 50.0f;   //      기본 50°   폭주 차단 (명령 없음)
+/* 지령 상한(45°) 바로 위에 두면 정상 동작이 차단에 걸린다. 10° 여유를 둔다. */
+const float ACT_LIMIT_DEG = 55.0f;   //      55°   폭주 차단 (명령 없음)
 const uint32_t FB_TIMEOUT_MS = 300;
 unsigned long lastFb = 0;
 

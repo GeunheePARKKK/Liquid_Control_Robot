@@ -71,7 +71,7 @@
  *   제어 게인                        기본값      범위        올릴 때
  *     g<값>   수평 게인              ★ 1.00     0 ~ 1.5     1.0 = 완전 수평
  *     ag<값>  합력 게인              ★ 1.00     0 ~ 1.5     ag0 이면 1단계와 동일
- *     ad<값>  합력 목표각 필터       ★ 0.20     0 ~ 1       작을수록 느리고 매끈
+ *     ad<값>  3축 합력 벡터 필터     ★ 0.20     0 ~ 1       각도가 아니라 벡터를 거른다
  *
  *   지령 응답                        기본값      범위        올릴 때
  *     r<값>   슬루 제한 [°/s]        ★ 30       5 ~ 400     ag 가 안 먹으면 여기
@@ -245,11 +245,45 @@ const float TORQUE_WARN = 3.0f;
  */
 volatile float ACC_GAIN = 1.0f;      // [ag] 기본 1.00  ag0 으로 끄면 1단계와 동일
 volatile float DIR_ACC  = +1.0f;     //      기본 +1    실측 확정 (명령 없음)
-volatile float ACC_LPF  = 0.2f;      // [ad] 기본 0.20  작을수록 느리고 매끈
+volatile float ACC_LPF  = 0.2f;      // [ad] 기본 0.20  ★ 3축 합력 벡터 전용
 const float ACC_REF_LIMIT = 20.0f;   //      기본 20°   θ_ref 상한 (명령 없음)
+
+/* 합력 벡터를 성분 상태로 들고 있는다. 각도로 바꾼 뒤 거르지 않고, 벡터를
+ * 거른 뒤 한 번만 각도로 바꾼다. 축별로 각도를 따로 거르면 두 축이 동시에
+ * 움직일 때 벡터의 길이와 방향이 서로 어긋난다.
+ */
+float force_ax = 0, force_ay = 0, force_az = 1;
+float force_pitch = 0, force_roll = 0;
 
 // 계산된 목표각 (표시·기록용)
 float ref_pitch = 0, ref_roll = 0;
+
+/* 수평 선형가속을 차체 기울기로 학습하지 않게 하는 자세 보정 게이트.
+ *
+ * 상보필터는 가속도계가 읽은 각도로 자이로 적분을 보정한다. 그런데 수평으로
+ * 가속하면 가속도계는 그것을 기울기로 읽는다. 그대로 보정하면 θ_base 가
+ * 가속을 기울기로 흡수해버린다 (경사/가속 모호성).
+ *
+ * 자이로 예측각과 가속도계 각이 크게 벌어지면 그 차이는 선형가속일 수 있다.
+ * 그동안 해당 축은 자이로 예측만 쓰고, 다시 가까워진 상태가 지속되면 보정을
+ * 재개한다. 합력 목표 계산에는 가속도계를 계속 쓴다.
+ *
+ * ⚠ 이 게이트는 모터 지령을 바꾸지 않는다. want = ref − θ_base 에서
+ *   ref = θ_base − θ_force 이므로 θ_base 가 소거되기 때문이다.
+ *   바뀌는 것은 (1) 로그의 pitch/ref 값과 (2) SR 의 종료 판정이다.
+ *   게이트가 없으면 가속 중 raw_ref 가 씻겨나가 SR 이 "끝났다" 고 조기
+ *   오판한다. 그것을 막는 것이 실질적 이득이다.
+ *
+ * 문턱은 SR 것을 그대로 쓴다. SR 이 꺼져 있어도 게이트는 돈다 — 로그의
+ * θ_base 를 정직하게 유지하기 위해서다.
+ */
+struct AccelCorrectionGate {
+  bool active;
+  uint16_t quietTicks;
+};
+
+AccelCorrectionGate accGatePitch = {false, 0};
+AccelCorrectionGate accGateRoll  = {false, 0};
 
 /* ── ZV 입력성형 (3단계) ──────────────────────────────────────────────────
  * 목표각을 반씩 나눠 반주기 간격으로 보낸다. 앞 임펄스가 만든 출렁임을 뒤
@@ -302,7 +336,7 @@ volatile uint16_t SR_DWELL_MS    = 30;      // [srd] 종료 확인 시간
 volatile uint16_t SR_HOLD_MS     = 100;     // [srh] 남은 반대 목표각 유지 시간
 volatile uint16_t SR_RETURN_MS   = 120;     // [srr] 최소저크 수평 복귀 시간
 
-enum SoftReturnPhase : uint8_t { SR_DIRECT, SR_HOLD, SR_RETURN, SR_LEVEL };
+enum SoftReturnPhase : uint8_t { SR_DIRECT, SR_CONFIRM, SR_HOLD, SR_RETURN, SR_LEVEL };
 
 struct SoftReturnAxis {
   SoftReturnPhase phase;
@@ -310,10 +344,11 @@ struct SoftReturnAxis {
   uint16_t quietTicks;
   uint16_t phaseTicks;
   float holdAngle;
+  float lastActiveAngle;      // 문턱을 넘기 직전의 유효 목표각
 };
 
-SoftReturnAxis srPitch = {SR_DIRECT, false, 0, 0, 0};
-SoftReturnAxis srRoll  = {SR_DIRECT, false, 0, 0, 0};
+SoftReturnAxis srPitch = {SR_DIRECT, false, 0, 0, 0, 0};
+SoftReturnAxis srRoll  = {SR_DIRECT, false, 0, 0, 0, 0};
 volatile bool srResetRequest = false;
 
 /* 폭주 차단 — 지령은 ±LIMIT_DEG 를 넘지 않으므로 실제 위치가 이 값을 넘으면
@@ -468,12 +503,43 @@ uint16_t msToCtrlTicks(uint16_t ms) {
   return ticks > 0 ? ticks : 1;
 }
 
+void accelGateReset() {
+  accGatePitch = {false, 0};
+  accGateRoll  = {false, 0};
+}
+
+/* 자이로 예측과 가속도계 각의 차이를 보고 보정을 막을지 정한다.
+ * 켜지는 문턱과 꺼지는 문턱이 다르다 (히스테리시스). 하나면 문턱 근처에서
+ * 켜졌다 꺼졌다 하며 자세 추정이 흔들린다.
+ */
+bool accelGateStep(float angleResidual, AccelCorrectionGate &g) {
+  float a = fabsf(angleResidual);
+  uint16_t dwellTicks = msToCtrlTicks(SR_DWELL_MS);
+
+  if (!g.active) {
+    if (a >= SR_ACTIVE_DEG) {
+      g.active = true;
+      g.quietTicks = 0;
+    }
+  } else if (a <= SR_END_DEG) {
+    if (g.quietTicks < 0xFFFF) g.quietTicks++;
+    if (g.quietTicks >= dwellTicks) {
+      g.active = false;
+      g.quietTicks = 0;
+    }
+  } else {
+    g.quietTicks = 0;
+  }
+  return g.active;
+}
+
 void softReturnResetAxis(SoftReturnAxis &s) {
   s.phase = SR_DIRECT;
   s.sawActive = false;
   s.quietTicks = 0;
   s.phaseTicks = 0;
   s.holdAngle = 0;
+  s.lastActiveAngle = 0;
 }
 
 void softReturnReset() {
@@ -483,6 +549,7 @@ void softReturnReset() {
 
 const char *softReturnPhaseName(SoftReturnPhase phase) {
   switch (phase) {
+    case SR_CONFIRM: return "CONFIRM";
     case SR_HOLD:   return "HOLD";
     case SR_RETURN: return "RETURN";
     case SR_LEVEL:  return "LEVEL";
@@ -490,8 +557,12 @@ const char *softReturnPhaseName(SoftReturnPhase phase) {
   }
 }
 
-/* 가속이 사라진 뒤 ACC_LPF 에 남은 값은 30ms 에 약 51%(alpha=0.2)가 된다.
- * 그 순간 값을 그대로 잡으므로 상태 진입 때 목표각 계단이 생기지 않는다.
+/* 종료 임계값을 처음 통과한 순간 직전 유효 목표를 붙잡는다.
+ *
+ * 종료 확인(dwell)을 마친 뒤에 잡으면 그 30ms 동안 ACC_LPF 가 이미 목표각을
+ * 0 쪽으로 깎아놓아 HOLD 가 실제 피크보다 약해진다. 그래서 문턱을 넘는 순간
+ * 직전 값(lastActiveAngle)을 잡아두고, 확인은 CONFIRM 단계에서 따로 한다.
+ * CONFIRM 중에 가속이 다시 올라오면 DIRECT 로 되돌아간다 — 오판을 물릴 수 있다.
  */
 float softReturnStep(float ref, float rawRef, SoftReturnAxis &s) {
   float a = fabsf(rawRef);
@@ -503,6 +574,7 @@ float softReturnStep(float ref, float rawRef, SoftReturnAxis &s) {
   if (s.phase != SR_DIRECT && a >= SR_ACTIVE_DEG) {
     softReturnResetAxis(s);
     s.sawActive = true;
+    s.lastActiveAngle = ref;
     return ref;
   }
 
@@ -510,24 +582,36 @@ float softReturnStep(float ref, float rawRef, SoftReturnAxis &s) {
     if (a >= SR_ACTIVE_DEG) {
       s.sawActive = true;
       s.quietTicks = 0;
+      s.lastActiveAngle = ref;
     } else if (s.sawActive) {
-      if (a <= SR_END_DEG) {
-        if (s.quietTicks < 0xFFFF) s.quietTicks++;
-        if (s.quietTicks >= dwellTicks) {
-          s.quietTicks = 0;
-          s.phaseTicks = 0;
-          s.holdAngle = ref;       // 현재 출력과 같아 진입 시 불연속이 없다
-          if (fabsf(s.holdAngle) >= 0.15f) s.phase = SR_HOLD;
-          else {
-            s.phase = SR_LEVEL;
-            s.sawActive = false;
-          }
-        }
+      if (a > SR_END_DEG) {
+        s.lastActiveAngle = ref;      // 아직 유효 구간. 계속 갱신한다
       } else {
-        s.quietTicks = 0;
+        s.phase = SR_CONFIRM;
+        s.phaseTicks = 0;
+        s.holdAngle = s.lastActiveAngle;   // 깎이기 전 값을 잡는다
+        if (fabsf(s.holdAngle) < 0.15f) {
+          s.phase = SR_LEVEL;
+          s.sawActive = false;
+        }
+        return s.holdAngle;
       }
     }
     return ref;
+  }
+
+  if (s.phase == SR_CONFIRM) {
+    if (a > SR_END_DEG) {              // 아직 끝난 게 아니었다
+      s.phase = SR_DIRECT;
+      s.phaseTicks = 0;
+      s.lastActiveAngle = ref;
+      return ref;
+    }
+    if (++s.phaseTicks >= dwellTicks) {
+      s.phase = SR_HOLD;
+      s.phaseTicks = 0;
+    }
+    return s.holdAngle;
   }
 
   if (s.phase == SR_HOLD) {
@@ -737,6 +821,7 @@ void motorsDisarm(const char *reason) {
   armed = false;
   cmd_pitch = 0;  cmd_roll = 0;
   softReturnReset();
+  accelGateReset();
 }
 
 void motorsArm() {
@@ -756,6 +841,7 @@ void motorsArm() {
   // enable 전에 목표를 현재 위치(0)로 박아둔다. 빼면 마지막 목표로 확 튄다.
   cmd_pitch = 0;  cmd_roll = 0;
   softReturnReset();
+  accelGateReset();
   sendBoth();
   delay(50);
 
@@ -851,6 +937,10 @@ void printStatus() {
   /* 값마다 어느 명령으로 바꾸는지 이름을 붙여 찍는다. 표를 다시 찾아보지
    * 않고 바로 고칠 수 있다.
    */
+  Serial.printf("       합력각(p/r) %.2f/%.2f°   자세보정게이트 %s/%s\n",
+                force_pitch, force_roll,
+                accGatePitch.active ? "BLOCK" : "TRACK",
+                accGateRoll.active  ? "BLOCK" : "TRACK");
   Serial.printf("       소프트복귀 %s   sra %.2f°  sre %.2f°\n",
                 SOFT_RETURN_ON ? "ON " : "OFF", SR_ACTIVE_DEG, SR_END_DEG);
   Serial.printf("                       srd %ums(확인)  srh %ums(유지)  srr %ums(복귀)\n",
@@ -1195,7 +1285,11 @@ void setup() {
     readIMU(ax, ay, az, gx, gy, gz);
     pitch_filtered = atan2((float)ay,  sqrt(pow((float)ax, 2) + pow((float)az, 2))) * (180.0 / PI);
     roll_filtered  = atan2((float)-ax, sqrt(pow((float)ay, 2) + pow((float)az, 2))) * (180.0 / PI);
+    force_ax = (float)ax;  force_ay = (float)ay;  force_az = (float)az;
+    force_pitch = pitch_filtered;
+    force_roll  = roll_filtered;
   }
+  accelGateReset();
 
   // ── CAN ──
   twai_general_config_t g = TWAI_GENERAL_CONFIG_DEFAULT(CAN_TX_PIN, CAN_RX_PIN, TWAI_MODE_NORMAL);
@@ -1304,6 +1398,15 @@ void ctrlTask(void *arg) {
     float pitch_acc = atan2((float)ay,  sqrt(pow((float)ax, 2) + pow((float)az, 2))) * (180.0 / PI);
     float roll_acc  = atan2((float)-ax, sqrt(pow((float)ay, 2) + pow((float)az, 2))) * (180.0 / PI);
 
+    /* 합력 벡터를 성분 상태에서 한 번만 거른 뒤 각도로 바꾼다. 각 축의 각도를
+     * 따로 거르면 두 축이 동시에 움직일 때 벡터 길이와 방향이 어긋난다.
+     */
+    force_ax = ACC_LPF * (float)ax + (1.0f - ACC_LPF) * force_ax;
+    force_ay = ACC_LPF * (float)ay + (1.0f - ACC_LPF) * force_ay;
+    force_az = ACC_LPF * (float)az + (1.0f - ACC_LPF) * force_az;
+    force_pitch = atan2f(force_ay,  sqrtf(force_ax * force_ax + force_az * force_az)) * RAD_TO_DEG;
+    force_roll  = atan2f(-force_ax, sqrtf(force_ay * force_ay + force_az * force_az)) * RAD_TO_DEG;
+
     float fax = ax, fay = ay, faz = az;
     float a_mag = sqrtf(fax * fax + fay * fay + faz * faz) / G_LSB / g_scale;
 
@@ -1312,8 +1415,19 @@ void ctrlTask(void *arg) {
     float trust = constrain(1.0f - dev / ACC_TRUST_FALLOFF, 0.0f, 1.0f);
     float alpha = 1.0f - (1.0f - alpha_cf) * trust;
 
-    pitch_filtered = alpha * (pitch_filtered + rate_pitch * dt) + (1.0f - alpha) * pitch_acc;
-    roll_filtered  = alpha * (roll_filtered  + rate_roll  * dt) + (1.0f - alpha) * roll_acc;
+    /* 자이로 예측과 가속도계 합력각이 크게 다르면 그 차이는 선형가속일 수 있다.
+     * 그동안 가속도계로 자세를 보정하면 수평가속을 차체 기울기로 학습하므로,
+     * 해당 축은 자이로 예측만 사용한다.
+     */
+    float predicted_pitch = pitch_filtered + rate_pitch * dt;
+    float predicted_roll  = roll_filtered  + rate_roll  * dt;
+    bool block_acc_pitch = accelGateStep(predicted_pitch - pitch_acc, accGatePitch);
+    bool block_acc_roll  = accelGateStep(predicted_roll  - roll_acc,  accGateRoll);
+
+    float alpha_pitch = block_acc_pitch ? 1.0f : alpha;
+    float alpha_roll  = block_acc_roll  ? 1.0f : alpha;
+    pitch_filtered = alpha_pitch * predicted_pitch + (1.0f - alpha_pitch) * force_pitch;
+    roll_filtered  = alpha_roll  * predicted_roll  + (1.0f - alpha_roll)  * force_roll;
 
     n_win++;
     if (trust <= 0.0f) { err_win++; rej_run++; } else rej_run = 0;
@@ -1333,45 +1447,34 @@ void ctrlTask(void *arg) {
     drainCAN();
 
     // ── 3. 합력 벡터 목표각 ──
-    /* 두 축의 부호 규약이 반대라는 점이 이 블록 전체를 지배한다.
+    /* 합력각을 직접 목표로 쓴다. 중력을 빼서 선형가속을 복원한 뒤 다시 각도로
+     * 바꾸던 방식을 대체한다.
      *
-     *     pitch 는  +ay  로,   roll 은  -ax  로 각도를 정의했다 (README 참고).
+     *   want = ACC_GAIN·ref − GAIN·θ_base,   ref = θ_base − θ_force
+     *        = −θ_force                       (GAIN = ACC_GAIN 일 때)
      *
-     * 그래서 roll 의 가속도 성분을 처음부터 -ax 로 잡는다. 그러면 중력 제거도
-     * 목표각 계산도 두 축이 똑같은 식이 되어, 규약을 틀릴 자리가 한 곳뿐이다.
-     * 축마다 부호를 따로 들고 있으면 두 곳에서 어긋난다 — 실제로 그랬다.
+     * θ_base 가 소거되므로 자세 추정 오차가 지령에 닿지 않는다. 예전 방식도
+     * 1차 근사로는 같은 결과였지만, one_g 를 상수로 쓰기 때문에 가속 중
+     * 비력의 크기가 g 가 아니라는 점에서 오차가 남았다.
      *
-     *   1차 : 중력 제거를 두 축 다 빼도록 써서 roll 만 중력이 두 배로 남았다.
-     *          평평한데 ref_roll 이 -5°, 조금만 기울이면 상한에 포화.
-     *   2차 : 목표각 부호를 DIR_ACC 하나로 공유해 pitch 만 반대가 됐다.
-     *          정지 상태로는 안 보이고 가속할 때만 나타난다.
+     *   차체 20° 기울고 0.3g 가속 :  정답 −16.70°,  예전 −15.74°  (0.96° 부족)
+     *   차체 30° 기울고 0.3g 가속 :  정답 −16.70°,  예전 −14.56°  (2.14° 부족)
+     *
+     * 합력각 방식은 크기를 쓰지 않고 방향만 보므로 모든 각도에서 정확하고,
+     * g_scale 오차에도 영향을 받지 않는다.
+     *
+     * raw 는 필터 전(pitch_acc), ref 는 3축 벡터 필터 뒤(force_pitch)를 쓴다.
+     * SR 의 종료 판정은 빨라야 하므로 필터 전 값을 본다.
      */
-    float one_g = G_LSB * g_scale;
-
-    float acc_p =  (float)ay;     // pitch 규약의 가속도 성분
-    float acc_r = -(float)ax;     // roll  규약의 가속도 성분  ★ 각도 정의와 동일
-
-    /* 가속도계는 기울어져 있기만 해도 중력을 읽는다. theta_base 로 그 몫을
-     * 계산해 빼야 순수한 선형 가속만 남는다.
-     */
-    float p_lin = acc_p - one_g * sinf(pitch_filtered * DEG_TO_RAD);
-    float r_lin = acc_r - one_g * sinf(roll_filtered  * DEG_TO_RAD);
-
-    /* 합력이 수직에서 벗어난 각도.  theta_ref = -atan(a_linear / g)
-     *
-     * 앞의 마이너스가 물리다. +Y 로 가속하면 액체는 -Y 로 쏠리므로 트레이의
-     * +Y 쪽을 내려야 하고, 우리 규약에서 +pitch 는 +Y 가 올라가는 것이라
-     * 목표각은 음수가 된다. DIR_ACC 는 실측용으로 남겨둔 뒤집기다.
-     */
-    float raw_ref_p = -atan2f(p_lin, one_g) * RAD_TO_DEG * DIR_ACC;
-    float raw_ref_r = -atan2f(r_lin, one_g) * RAD_TO_DEG * DIR_ACC;
+    float raw_ref_p = (pitch_filtered - pitch_acc) * DIR_ACC;
+    float raw_ref_r = (roll_filtered  - roll_acc)  * DIR_ACC;
+    ref_pitch = (pitch_filtered - force_pitch) * DIR_ACC;
+    ref_roll  = (roll_filtered  - force_roll)  * DIR_ACC;
 
     raw_ref_p = constrain(raw_ref_p, -ACC_REF_LIMIT, ACC_REF_LIMIT);
     raw_ref_r = constrain(raw_ref_r, -ACC_REF_LIMIT, ACC_REF_LIMIT);
-
-    // 선형 가속 추정은 노이즈가 크므로 목표각을 따로 저역통과
-    ref_pitch = ACC_LPF * raw_ref_p + (1.0f - ACC_LPF) * ref_pitch;
-    ref_roll  = ACC_LPF * raw_ref_r + (1.0f - ACC_LPF) * ref_roll;
+    ref_pitch = constrain(ref_pitch, -ACC_REF_LIMIT, ACC_REF_LIMIT);
+    ref_roll  = constrain(ref_roll,  -ACC_REF_LIMIT, ACC_REF_LIMIT);
 
     /* ── 3.5. ZV 입력성형 ──
      * 링 버퍼에 목표각을 쌓고, 반주기 전 값을 섞는다. 꺼져 있으면 그대로 통과.

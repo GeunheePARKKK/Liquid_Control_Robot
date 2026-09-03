@@ -713,7 +713,7 @@ raw → ACC_LPF → ref → ZV → want → CMD_LPF → pre → slew → cmd →
 
 ## 가속 종료 소프트 복귀
 
-`HASH` · 2026-09-03 23:01 푸시
+`e054139` · 2026-09-03 23:01 푸시
 
 `지연_개선_실험/soft_return_rtos.ino` 에서 제어 부분만 옮겼다. 그 파일에 있던
 속도 피드포워드(`v_des`)와 CAN 진단은 **가져오지 않았다.**

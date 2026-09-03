@@ -971,7 +971,7 @@ ZV 는 양쪽을 모두 성형한다.
 
 ## 실측 기본값
 
-`HASH` · 2026-09-04 02:13 푸시
+`c8d912d` · 2026-09-04 02:13 푸시
 
 ```cpp
 KP_PITCH 4.0    KD_PITCH 0.20    MAX_RATE 120    CMD_LPF 0.30    CAN_DIV 1    ZV_ON true

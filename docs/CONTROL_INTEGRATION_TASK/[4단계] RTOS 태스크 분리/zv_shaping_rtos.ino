@@ -113,6 +113,9 @@
  *       관성이 커서 같은 Kp 로는 못 따라온다. kpr 을 올려 지연을 맞출 것.
  *       Kp 를 올리면 Kd 도 sqrt 비율로 같이 올려야 발진하지 않는다.
  *     dp / dr 회전 방향 뒤집기       ★ −1 / +1  토글        안쪽 / 바깥
+ *     ff1/ff0 모터 피드포워드        ★ 꺼짐                  v_des=θ̇cmd, t_ff=J·θ̈cmd
+ *     fj<값>  안쪽 관성 J [kg·m²]     ★ 0.0038   0 ~ 0.1     실측 (Kp4 로그 3개)
+ *     fjr<값> 바깥 관성 J             ★ 0        0 ~ 0.1     미측정. 0 이면 v_des 만
  *
  *   코드에만 있는 값 (명령 없음)
  *     DIR_ACC        ★ +1     합력 목표각 부호. 실측 확정
@@ -231,6 +234,36 @@ volatile float KP_ROLL  = 2.0f;    // [kpr] 바깥 0x01 — 올려야 할 쪽
 volatile float KD_ROLL  = 0.13f;   // [kdr]
 
 const float TORQUE_WARN = 3.0f;
+
+/* ── 모터 피드포워드 (2026-09-04) ─────────────────────────────────────────
+ * MIT 토크:  τ = Kp·(p_des − p) + Kd·(v_des − v) + t_ff
+ *
+ * 지금까지 v_des 와 t_ff 를 0 으로 두고 Kp/Kd 만으로 움직였다. 그러면 모터는
+ * 오차가 생긴 뒤에야 토크를 내고, 그 지연이 70ms 였다. Kp 를 올려 줄이려다
+ * 토크 계단·전원 처짐에 막혔다 (kpp6).
+ *
+ * 빠른 서보는 강성이 아니라 피드포워드로 대역폭을 얻는다. 지령이 어디로
+ * 가는지 이미 아니까 그 방향으로 토크를 미리 넣고, 피드백은 오차만 잡는다.
+ * 지령은 CMD_LPF·슬루를 거친 매끈한 신호라 미분해도 잡음이 안 는다 —
+ * Kp/Kd 를 올리는 것과 결정적으로 다른 점이다.
+ *
+ *   v_des = θ̇_cmd          Kd 가 "시킨 움직임" 을 방해하지 않게
+ *   t_ff  = J·θ̈_cmd        관성을 미리 민다
+ *
+ * J 는 Kp4/Kd0.2 로그 세 개에서 Kp·(cmd−act) = J·θ̈ + b·θ̇ + c·sgn 으로
+ * 맞춰 얻었다. 0.0034 / 0.0040 / 0.0039,  R² 0.83~0.89.  b ≈ 0.21 로 Kd 와
+ * 같아 마찰은 거의 없고, 고유주파수 5Hz, ζ 0.84 다.
+ *
+ * 바깥축 J 는 아직 안 쟀다. 0 으로 두어 v_des 만 적용된다.
+ * t_ff 는 ±FF_TMAX 로 자른다. 슬루 켜지고 꺼지는 순간 θ̈ 가 튈 수 있다.
+ */
+volatile bool  FF_ON       = false;    // [ff]  기본 꺼짐. ff1 로 켠다
+volatile float FF_J_PITCH  = 0.0038f;  // [fj]  안쪽 관성 [kg·m²]  실측
+volatile float FF_J_ROLL   = 0.0f;     // [fjr] 바깥 관성. 미측정 → 0
+const float    FF_TMAX     = 1.5f;     // t_ff 상한 [N·m]
+const float    FF_LPF      = 0.5f;     // 미분 잡음 완화
+
+volatile float ff_vel_p = 0, ff_acc_p = 0, ff_vel_r = 0, ff_acc_r = 0;   // [deg/s], [deg/s²]
 
 /* ── 합력 벡터 (2단계) ────────────────────────────────────────────────────
  * ACC_GAIN 0 이면 θ_ref 가 항상 0 이라 1단계(수평 유지)와 완전히 같다.
@@ -830,8 +863,18 @@ void broadcastUniversal(uint8_t last) {
  * 의미가 같이 바뀌어 무엇을 보고 있는지 알 수 없게 된다.
  */
 void sendBoth() {
-  sendMIT(CAN_ID_PITCH, cmd_pitch * DIR_PITCH * DEG_TO_RAD, 0.0f, KP_PITCH, KD_PITCH, 0.0f);
-  sendMIT(CAN_ID_ROLL,  cmd_roll  * DIR_ROLL  * DEG_TO_RAD, 0.0f, KP_ROLL,  KD_ROLL,  0.0f);
+  /* 위치와 마찬가지로 속도·토크에도 DIR 을 곱한다. 빠뜨리면 피드포워드가
+   * 도와주는 대신 반대로 민다.
+   */
+  float vp = 0, vr = 0, tp = 0, tr = 0;
+  if (FF_ON) {
+    vp = ff_vel_p * DEG_TO_RAD * DIR_PITCH;
+    vr = ff_vel_r * DEG_TO_RAD * DIR_ROLL;
+    tp = constrain(FF_J_PITCH * ff_acc_p * DEG_TO_RAD, -FF_TMAX, FF_TMAX) * DIR_PITCH;
+    tr = constrain(FF_J_ROLL  * ff_acc_r * DEG_TO_RAD, -FF_TMAX, FF_TMAX) * DIR_ROLL;
+  }
+  sendMIT(CAN_ID_PITCH, cmd_pitch * DIR_PITCH * DEG_TO_RAD, vp, KP_PITCH, KD_PITCH, tp);
+  sendMIT(CAN_ID_ROLL,  cmd_roll  * DIR_ROLL  * DEG_TO_RAD, vr, KP_ROLL,  KD_ROLL,  tr);
 }
 
 
@@ -843,6 +886,7 @@ void motorsDisarm(const char *reason) {
   broadcastUniversal(0xFD);
   armed = false;
   cmd_pitch = 0;  cmd_roll = 0;
+  ff_vel_p = ff_acc_p = ff_vel_r = ff_acc_r = 0;
   softReturnReset();
   accelGateReset();
 }
@@ -863,6 +907,7 @@ void motorsArm() {
 
   // enable 전에 목표를 현재 위치(0)로 박아둔다. 빼면 마지막 목표로 확 튄다.
   cmd_pitch = 0;  cmd_roll = 0;
+  ff_vel_p = ff_acc_p = ff_vel_r = ff_acc_r = 0;
   softReturnReset();
   accelGateReset();
   sendBoth();
@@ -952,6 +997,9 @@ void printStatus() {
                 DIR_PITCH, DIR_ROLL, imu_ok ? "OK" : "FAULT");
   Serial.printf("       Kp 안쪽 %.2f / 바깥 %.2f    Kd 안쪽 %.3f / 바깥 %.3f\n",
                 KP_PITCH, KP_ROLL, KD_PITCH, KD_ROLL);
+  Serial.printf("       피드포워드 %s   J %.4f/%.4f   v_des %+.0f°/s  t_ff %+.2f N·m\n",
+                FF_ON ? "ON " : "OFF", FF_J_PITCH, FF_J_ROLL, ff_vel_p,
+                constrain(FF_J_PITCH * ff_acc_p * DEG_TO_RAD, -FF_TMAX, FF_TMAX));
   Serial.printf("       ACC_GAIN=%.2f  DIR_ACC=%+.0f  ACC_LPF=%.2f   ref(p/r)=%.2f/%.2f\n",
                 ACC_GAIN, DIR_ACC, ACC_LPF, ref_pitch, ref_roll);
   /* 어느 성형기가 켜져 있는지 한눈에. 둘은 동시에 켜지지 않는다. */
@@ -1089,6 +1137,19 @@ void handleLine(const char *raw) {
    * ag 를 g 보다 먼저 보는 것과 같은 이유로, 순서가 뒤바뀌면 "kpr6" 이
    * kp 접두에 걸려 substring(2)="r6" -> toFloat()=0 으로 조용히 먹힌다.
    */
+  /* ff / fj / fjr 은 f(CMD_LPF) 보다 먼저 검사해야 한다. */
+  } else if (u.startsWith("fjr")) {
+    float v = s.substring(3).toFloat();
+    if (v >= 0.0f && v <= 0.1f) { FF_J_ROLL = v; Serial.printf(">>> FF_J_ROLL = %.4f kg·m²\n", FF_J_ROLL); }
+    else Serial.println("!! fjr 범위 0 ~ 0.1");
+  } else if (u.startsWith("fj")) {
+    float v = s.substring(2).toFloat();
+    if (v >= 0.0f && v <= 0.1f) { FF_J_PITCH = v; Serial.printf(">>> FF_J_PITCH = %.4f kg·m²\n", FF_J_PITCH); }
+    else Serial.println("!! fj 범위 0 ~ 0.1");
+  } else if (u.startsWith("ff")) {
+    FF_ON = (s.substring(2).toInt() != 0);
+    Serial.printf(">>> 피드포워드 %s   J 안쪽 %.4f / 바깥 %.4f   t_ff 상한 %.1f N·m\n",
+                  FF_ON ? "켜짐" : "꺼짐 — v_des=0, t_ff=0", FF_J_PITCH, FF_J_ROLL, FF_TMAX);
   } else if (u.startsWith("kpp") || u.startsWith("kpr")) {
     bool isP = u.startsWith("kpp");
     float v = s.substring(3).toFloat();
@@ -1255,7 +1316,7 @@ void handleLine(const char *raw) {
   } else if (u == "?") {
     printStatus();
   } else {
-    Serial.println("명령: arm/stop/z/t/q/g/ag/ad/kp/kd/f/r/d/dp/dr/zv/zf/zd/zm/sr/sra/sre/srd/srh/srr/?");
+    Serial.println("명령: arm/stop/z/t/q/g/ag/ad/kp/kd/f/r/d/dp/dr/ff/fj/fjr/zv/zf/zd/zm/sr/sra/sre/srd/srh/srr/?");
   }
 }
 
@@ -1347,6 +1408,8 @@ void setup() {
                  ZV_FREQ, ZV_ZETA, ZV_MODE, zvDelayMs());
   Serial.printf ("  dp / dr 부호 뒤집기   현재 %+.0f / %+.0f  (안쪽 / 바깥)\n",
                  DIR_PITCH, DIR_ROLL);
+  Serial.printf ("  ff1/ff0 모터 피드포워드   fj/fjr 관성   현재 %s  J %.4f/%.4f\n",
+                 FF_ON ? "켜짐" : "꺼짐", FF_J_PITCH, FF_J_ROLL);
   Serial.println("==================================================\n");
 
   /* 여기부터 두 태스크가 돈다. 큐를 먼저 만들어야 qprintf 가 큐로 간다.
@@ -1542,8 +1605,21 @@ void ctrlTask(void *arg) {
     lpf_roll  = CMD_LPF * want_roll  + (1.0f - CMD_LPF) * lpf_roll;
 
     const float maxStep = MAX_RATE * dt;
+    float prev_p = cmd_pitch, prev_r = cmd_roll;
     cmd_pitch = slew(lpf_pitch, cmd_pitch, maxStep);
     cmd_roll  = slew(lpf_roll,  cmd_roll,  maxStep);
+
+    /* 피드포워드용 지령 속도·가속도. 슬루 뒤에서 재므로 지령이 실제로 가는
+     * 궤적 그대로다. 두 번 미분이라 가볍게 거른다.
+     */
+    {
+      float pv = ff_vel_p, rv = ff_vel_r;
+      float vp = (cmd_pitch - prev_p) / dt, vr = (cmd_roll - prev_r) / dt;
+      ff_vel_p = FF_LPF * vp + (1.0f - FF_LPF) * ff_vel_p;
+      ff_vel_r = FF_LPF * vr + (1.0f - FF_LPF) * ff_vel_r;
+      ff_acc_p = FF_LPF * ((ff_vel_p - pv) / dt) + (1.0f - FF_LPF) * ff_acc_p;
+      ff_acc_r = FF_LPF * ((ff_vel_r - rv) / dt) + (1.0f - FF_LPF) * ff_acc_r;
+    }
 
     static int div_cnt = 0;
     if (armed && (++div_cnt >= CAN_DIV)) {

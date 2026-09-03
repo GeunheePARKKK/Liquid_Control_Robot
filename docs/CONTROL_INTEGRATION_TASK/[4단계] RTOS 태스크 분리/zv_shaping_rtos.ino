@@ -89,6 +89,7 @@
  *     kd<값>  감쇠 — 두 축 함께      ★ 0.13     0 ~ 5       0 은 매뉴얼상 금지
  *     kpp/kpr 강성 — 안쪽/바깥 따로  ★ 2.0/2.0              예) kpr6
  *     kdp/kdr 감쇠 — 안쪽/바깥 따로  ★ 0.13/0.13            예) kdr0.22
+ *
  *       바깥축이 안쪽보다 81ms 느리다 (189 vs 108ms, 2026-09-01 실측).
  *       관성이 커서 같은 Kp 로는 못 따라온다. kpr 을 올려 지연을 맞출 것.
  *       Kp 를 올리면 Kd 도 sqrt 비율로 같이 올려야 발진하지 않는다.
@@ -362,7 +363,6 @@ uint32_t n_win = 0, err_win = 0, err_reset = 0;
  */
 struct Snap {
   uint32_t t;
-  float raw_p, raw_r;              // ACC_LPF 를 걸기 전의 합력 목표각
   float pre_p, pre_r, pitch, ref_p, zv_p, cmd_p, act_p;
   float roll, ref_r, zv_r, cmd_r, act_r;
 };
@@ -688,353 +688,6 @@ void reportKd(float changed) {
     Serial.println("    !! 바깥축 Kp 대비 Kd 가 낮습니다 (1.75Hz 한계진동 이력)");
 }
 
-/* CAN 버스 상태를 드라이버에서 직접 읽는다.
- *
- * "피드백 0회" 만으로는 원인을 못 가린다. twai_transmit() 은 큐에 넣기만
- * 성공해도 ESP_OK 라 TX실패 가 0 이어도 버스가 죽어 있을 수 있다.
- *
- * CAN 은 듣고 있는 노드가 하나라도 있으면 ACK 를 낸다. 그래서 두 경우가
- * 에러 카운터로 깔끔하게 갈린다.
- *
- *   배선·트랜시버 죽음 (ACK 없음)  ->  TX에러 255 까지 상승, BUS_OFF
- *   드라이버 모드 불일치 (ACK 있음) ->  TX에러 0 유지, RUNNING, 피드백만 0
- */
-const char* twaiStateName(twai_state_t st) {
-  switch (st) {
-    case TWAI_STATE_STOPPED:    return "STOPPED";
-    case TWAI_STATE_RUNNING:    return "RUNNING";
-    case TWAI_STATE_BUS_OFF:    return "BUS_OFF ★버스 끊김";
-    case TWAI_STATE_RECOVERING: return "RECOVERING";
-    default:                    return "미정의";
-  }
-}
-
-/* 버스오프 복구.
- *
- * ESP32 TWAI 는 TX 에러가 255 를 넘으면 BUS_OFF 로 가고 **스스로 나오지
- * 않는다.** twai_initiate_recovery() 를 부르고, 상태가 STOPPED 가 되면
- * twai_start() 로 다시 올려야 한다. 이게 없으면 선을 고쳐도 재부팅 전까지
- * 계속 죽어 있다. 실제로 그렇게 한 번 막혔다.
- *
- * 복구 자체도 버스가 정상이어야 끝난다 (11비트 recessive 를 128번 봐야 한다).
- * 그래서 선이 아직 끊겨 있으면 RECOVERING 에 머문다 — 그 상태가 보이면
- * 배선이 아직 안 고쳐진 것이다.
- */
-uint32_t canRecoverTry = 0;
-bool     canWasOff     = false;
-
-void canRecoverTick() {
-  twai_status_info_t st;
-  if (twai_get_status_info(&st) != ESP_OK) return;
-
-  if (st.state == TWAI_STATE_BUS_OFF) {
-    if (!canWasOff) {
-      canWasOff = true;
-      Serial.printf("!! CAN BUS_OFF (TX에러 %lu) — 복구 시도. 배선을 확인하세요\n",
-                    (unsigned long)st.tx_error_counter);
-      motorsDisarm("CAN 버스오프");
-    }
-    canRecoverTry++;
-    twai_initiate_recovery();
-  } else if (st.state == TWAI_STATE_STOPPED) {
-    /* 복구가 끝나면 STOPPED 로 떨어진다. 다시 올려야 송수신이 된다. */
-    if (twai_start() == ESP_OK)
-      Serial.printf(">>> CAN 복구 완료 (시도 %lu회). arm 다시 하세요\n", canRecoverTry);
-    canWasOff = false;
-  } else if (st.state == TWAI_STATE_RUNNING) {
-    canWasOff = false;
-  }
-}
-
-/* CAN 자체 점검.  모터를 배제하고 ESP32 + 트랜시버 구간만 본다.
- *
- * NO_ACK 모드는 ACK 를 요구하지 않고 보낸다. 그래서 버스에 듣는 노드가
- * 하나도 없어도 버스오프로 가지 않는다. 그리고 트랜시버가 정상이면 자기가
- * 보낸 프레임이 버스를 타고 RX 로 되돌아온다 (TX 는 버스를 구동하고 RX 는
- * 그 버스를 읽으므로).
- *
- *   프레임이 돌아온다  ->  ESP32 + 트랜시버 + H/L 배선까지 정상.
- *                         남은 원인은 드라이버 전원 또는 ControlMode 다.
- *   안 돌아온다        ->  ESP32↔트랜시버 구간(GPIO4/5) 또는 트랜시버 자체.
- *                         모터는 무죄다.
- *
- * 끝나면 반드시 NORMAL 모드로 되돌린다.
- */
-/* 핀 레벨 트랜시버 시험.  CAN 프로토콜도 모터도 거치지 않는다.
- *
- * 트랜시버는 TXD 가 LOW 면 버스를 우성(dominant)으로 끌고, RXD 로 그 버스를
- * 되읽는다. 그래서 TWAI 를 떼고 핀을 직접 흔들면 칩 하나만 시험할 수 있다.
- *
- *   TX HIGH -> RX HIGH,  TX LOW -> RX LOW   ->  트랜시버 정상
- *   TX 를 LOW 로 내려도 RX 가 HIGH          ->  TX 가 버스에 도달하지 않는다
- *   RX 가 항상 LOW                          ->  트랜시버 무전원, 또는 H/L 단락
- *   RX 가 항상 HIGH 이고 변화 없음          ->  RX 선 미연결(플로팅) 가능
- */
-void canPinTest() {
-  Serial.println(">>> 핀 레벨 트랜시버 시험 (TWAI 해제)");
-  twai_stop();
-  twai_driver_uninstall();
-
-  /* 두 방향을 다 해본다. 배선을 만지지 않고 TX/RX 뒤바뀜을 잡을 수 있다.
-   * GPIO4->RXD, GPIO5->TXD 로 뒤바뀌어 있으면 정방향 시험에서는 트랜시버의
-   * 출력 핀을 누르고 입력 핀을 읽는 셈이라 RX 가 계속 HIGH 로 보인다.
-   */
-  /* 먼저 ESP32 핀 자체를 배제한다. 구동한 값이 그 핀에서 다시 읽히지 않으면
-   * 외부가 붙잡고 있거나 핀이 손상된 것이다. 그러면 배선을 봐도 답이 없다.
-   */
-  for (int pin = 4; pin <= 5; pin++) {
-    pinMode(pin, OUTPUT);
-    digitalWrite(pin, LOW);  delay(2);  int lo = digitalRead(pin);
-    digitalWrite(pin, HIGH); delay(2);  int hi = digitalRead(pin);
-    pinMode(pin, INPUT);     delay(2);  int fl = digitalRead(pin);
-    Serial.printf("    GPIO%d 구동 LOW->%d HIGH->%d  놓으면->%d\n", pin, lo, hi, fl);
-    if (lo != 0 || hi != 1)
-      Serial.printf("    ★ GPIO%d 이 구동값을 못 따라간다 — 외부 고정 또는 핀 손상\n", pin);
-  }
-
-  int best = -1;
-  for (int dir = 0; dir < 2; dir++) {
-    int txp = (dir == 0) ? 4 : 5;
-    int rxp = (dir == 0) ? 5 : 4;
-
-    pinMode(rxp, INPUT);
-    pinMode(txp, OUTPUT);
-
-    digitalWrite(txp, HIGH); delay(3);
-    int rec1 = digitalRead(rxp);
-    digitalWrite(txp, LOW);  delay(3);
-    int dom  = digitalRead(rxp);
-    digitalWrite(txp, HIGH); delay(3);
-    int rec2 = digitalRead(rxp);
-    digitalWrite(txp, HIGH);
-
-    Serial.printf("    TX=GPIO%d RX=GPIO%d : %d %d %d\n", txp, rxp, rec1, dom, rec2);
-    if (rec1 == 1 && dom == 0 && rec2 == 1) best = dir;
-
-    pinMode(txp, INPUT);      // 다음 방향을 시험하기 전에 놓아준다
-  }
-
-  if (best == 0) {
-    Serial.println("    OK: 정방향(GPIO4=TX)에서 RX 가 TX 를 따라온다. 트랜시버 정상.");
-  } else if (best == 1) {
-    Serial.println("    ★ TX/RX 가 뒤바뀌어 있다. GPIO5 가 TXD, GPIO4 가 RXD 에 물렸다.");
-    Serial.println("      배선을 바꾸거나 코드의 CAN_TX_PIN/CAN_RX_PIN 을 맞바꿀 것.");
-  } else {
-    Serial.println("    NG: 어느 방향으로도 RX 가 TX 를 따라오지 않는다.");
-    Serial.println("      1) 트랜시버 Rs(S/STB/EN) 핀이 GND 에 물렸는지 — 안 물리면");
-    Serial.println("         대기모드가 되어 수신만 되고 송신이 안 된다. 가장 흔한 원인.");
-    Serial.println("      2) GPIO4 -> TXD 선 접촉");
-    Serial.println("      3) 트랜시버 불량");
-    Serial.println("      RX 가 1 로 읽히므로 트랜시버 전원(3.3V)은 들어와 있다.");
-  }
-}
-
-/* TXD 를 붙잡아 두고 멀티미터로 재게 한다.
- *
- * ct 는 3ms 마다 토글해서 계측기로는 못 읽는다. 우성 상태를 유지시켜 놓으면
- * 트랜시버가 버스를 실제로 구동하는지 전압으로 확인할 수 있다.
- *
- *   정상   CANH 약 3.3V,  CANL 약 0V,  차이 2V 이상
- *   불량   CANH ~= CANL   (차이 0.2V 이하)  -> 버스를 못 구동한다
- *                                              대기모드(Rs) 또는 칩 불량
- *
- * 열성 상태(TXD HIGH)도 함께 재두면 비교가 된다. 열성에서는 둘 다 중간전압
- * (3.3V 트랜시버면 약 1.6~2.5V)으로 붙어 있어야 한다.
- */
-void canHold(bool dominant, int seconds) {
-  motorsDisarm("CAN 전압 측정");
-  twai_stop();
-  twai_driver_uninstall();
-
-  pinMode(4, OUTPUT);
-  digitalWrite(4, dominant ? LOW : HIGH);
-  pinMode(5, INPUT);
-
-  Serial.printf(">>> TXD = %s (%s) — %d초간 유지\n",
-                dominant ? "LOW" : "HIGH",
-                dominant ? "우성 dominant" : "열성 recessive", seconds);
-  Serial.println("    지금 재세요:  트랜시버 VCC / CANH-GND / CANL-GND / CANH-CANL");
-  if (dominant) {
-    Serial.println("    정상이면  CANH ~3.3V,  CANL ~0V,  차이 2V 이상");
-    Serial.println("    차이가 0.2V 이하면 트랜시버가 버스를 못 구동하는 것");
-  } else {
-    Serial.println("    정상이면  CANH ~= CANL ~= 1.6~2.5V (둘이 붙어 있어야 한다)");
-  }
-
-  for (int i = seconds; i > 0; i--) {
-    Serial.printf("    %d\n", i);
-    delay(1000);
-    if (Serial.available()) { Serial.println("    중단"); break; }
-  }
-
-  digitalWrite(4, HIGH);
-  pinMode(4, INPUT);
-  twai_general_config_t g = TWAI_GENERAL_CONFIG_DEFAULT(CAN_TX_PIN, CAN_RX_PIN,
-                                                        TWAI_MODE_NORMAL);
-  twai_timing_config_t  t = TWAI_TIMING_CONFIG_1MBITS();
-  twai_filter_config_t  f = TWAI_FILTER_CONFIG_ACCEPT_ALL();
-  twai_driver_install(&g, &t, &f);
-  twai_start();
-  fb_count = 0;
-  canWasOff = false;
-  Serial.println(">>> NORMAL 모드로 복귀");
-}
-
-/* 트랜시버가 실제로 어느 핀에 붙었는지 찾는다.
- *
- * 핀 하나를 구동하고 나머지를 전부 읽어서, 같이 움직이는 핀을 찾는다.
- * 트랜시버가 붙어 있으면 TXD 를 내릴 때 RXD 가 따라 내려온다.
- *
- * ESP32-S3 에서 건드리면 안 되는 핀은 뺐다.
- *   19/20 USB,  26~32 flash,  33~37 octal PSRAM,  43/44 UART0,
- *   0/3/45/46 strapping,  38 RGB LED,  11/12 IMU I2C
- */
-void canScanPins() {
-  static const int CAND[] = {1,2,4,5,6,7,8,9,10,13,14,15,16,17,18,21,39,40,41,42};
-  const int N = sizeof(CAND) / sizeof(CAND[0]);
-
-  motorsDisarm("CAN 핀 탐색");
-  twai_stop();
-  twai_driver_uninstall();
-
-  Serial.println(">>> CAN 핀 탐색 — 읽기 핀에 풀업을 걸어 유령 쌍을 배제한다");
-  Serial.printf("    후보 %d개:", N);
-  for (int i = 0; i < N; i++) Serial.printf(" %d", CAND[i]);
-  Serial.println();
-
-  int found = 0;
-  for (int i = 0; i < N; i++) {
-    int tx = CAND[i];
-    /* 풀업을 켜서 유령 쌍을 걸러낸다. 떠 있는 핀끼리의 용량 결합은 풀업에
-     * 져서 HIGH 로 남지만, 진짜 트랜시버 RXD 는 출력이라 전류를 빨아들여
-     * 풀업이 있어도 LOW 를 유지한다.
-     */
-    for (int j = 0; j < N; j++) if (j != i) pinMode(CAND[j], INPUT_PULLUP);
-    pinMode(tx, OUTPUT);
-
-    digitalWrite(tx, HIGH); delay(3);
-    int hi[32];
-    for (int j = 0; j < N; j++) hi[j] = (j == i) ? -1 : digitalRead(CAND[j]);
-    digitalWrite(tx, LOW);  delay(3);
-    for (int j = 0; j < N; j++) {
-      if (j == i) continue;
-      int lo = digitalRead(CAND[j]);
-      if (hi[j] == 1 && lo == 0) {
-        Serial.printf("    TX=GPIO%d -> RX=GPIO%d 따라옴 (풀업 이김)\n", tx, CAND[j]);
-        found++;
-      }
-    }
-    digitalWrite(tx, HIGH); delay(2);
-    pinMode(tx, INPUT);
-  }
-
-  if (found == 0) {
-    Serial.println("    아무 쌍도 없다. 트랜시버가 후보 핀 어디에도 붙어 있지 않다.");
-    Serial.println("    → 트랜시버 모듈의 TXD/RXD 가 ESP32 에 실제로 연결됐는지,");
-    Serial.println("      그리고 모듈 VCC/GND 가 물렸는지 확인. 코드 핀 번호는 무죄다.");
-  } else {
-    Serial.printf("    쌍 %d개 발견. CAN_TX_PIN / CAN_RX_PIN 을 그 번호로 바꾸면 된다.\n", found);
-  }
-
-  twai_general_config_t g = TWAI_GENERAL_CONFIG_DEFAULT(CAN_TX_PIN, CAN_RX_PIN,
-                                                        TWAI_MODE_NORMAL);
-  twai_timing_config_t  t = TWAI_TIMING_CONFIG_1MBITS();
-  twai_filter_config_t  f = TWAI_FILTER_CONFIG_ACCEPT_ALL();
-  twai_driver_install(&g, &t, &f);
-  twai_start();
-  fb_count = 0;  canWasOff = false;
-  Serial.println(">>> NORMAL 모드로 복귀");
-}
-
-void canSelfTest() {
-  motorsDisarm("CAN 자체 점검");
-  canPinTest();
-  Serial.println(">>> NO_ACK 모드로 자기 프레임 되돌림 확인");
-
-  twai_general_config_t g = TWAI_GENERAL_CONFIG_DEFAULT(CAN_TX_PIN, CAN_RX_PIN,
-                                                        TWAI_MODE_NO_ACK);
-  twai_timing_config_t  tc = TWAI_TIMING_CONFIG_1MBITS();
-  twai_filter_config_t  fc = TWAI_FILTER_CONFIG_ACCEPT_ALL();
-  bool ok = (twai_driver_install(&g, &tc, &fc) == ESP_OK) && (twai_start() == ESP_OK);
-  if (!ok) {
-    Serial.println("!! NO_ACK 모드 설치 실패");
-  } else {
-    delay(20);
-    twai_message_t rx;
-    while (twai_receive(&rx, 0) == ESP_OK) { }      // 묵은 프레임 비우기
-
-    int sent = 0, got = 0;
-    for (int i = 0; i < 5; i++) {
-      twai_message_t m = {};
-      m.identifier = 0x7FF;            // 모터가 쓰지 않는 ID
-      m.data_length_code = 1;
-      m.data[0] = (uint8_t)i;
-      if (twai_transmit(&m, pdMS_TO_TICKS(20)) == ESP_OK) sent++;
-      uint32_t t0 = millis();
-      while (millis() - t0 < 40) {
-        if (twai_receive(&rx, pdMS_TO_TICKS(5)) == ESP_OK) {
-          if (rx.identifier == 0x7FF) { got++; break; }
-        }
-      }
-    }
-    twai_status_info_t st;
-    twai_get_status_info(&st);
-    Serial.printf("    sent %d/5\n", sent);
-    Serial.printf("    back %d/5\n", got);
-    Serial.printf("    tx_err %lu\n", (unsigned long)st.tx_error_counter);
-    if (got > 0) {
-      Serial.println("    ✅ ESP32·트랜시버·H/L 배선 정상.");
-      Serial.println("       남은 원인은 드라이버 24V 전원 또는 ControlMode 다.");
-    } else {
-      Serial.println("    ❌ 자기 프레임이 안 돌아온다.");
-      Serial.println("       GPIO4(TX)/GPIO5(RX) 배선, 트랜시버 3.3V, 트랜시버 불량 순으로 확인.");
-      Serial.println("       모터는 이 결과와 무관하다.");
-    }
-  }
-
-  twai_stop();
-  twai_driver_uninstall();
-  twai_general_config_t g2 = TWAI_GENERAL_CONFIG_DEFAULT(CAN_TX_PIN, CAN_RX_PIN,
-                                                         TWAI_MODE_NORMAL);
-  twai_timing_config_t  t2 = TWAI_TIMING_CONFIG_1MBITS();
-  twai_filter_config_t  f2 = TWAI_FILTER_CONFIG_ACCEPT_ALL();
-  twai_driver_install(&g2, &t2, &f2);
-  twai_start();
-  fb_count = 0;
-  canWasOff = false;
-  Serial.println(">>> NORMAL 모드로 복귀");
-}
-
-void printCanStatus() {
-  twai_status_info_t st;
-  if (twai_get_status_info(&st) != ESP_OK) {
-    Serial.println("[can] 상태 읽기 실패");
-    return;
-  }
-  Serial.printf("[can] %s  TX에러 %lu  RX에러 %lu  중재실패 %lu  버스에러 %lu\n",
-                twaiStateName(st.state),
-                (unsigned long)st.tx_error_counter,
-                (unsigned long)st.rx_error_counter,
-                (unsigned long)st.arb_lost_count,
-                (unsigned long)st.bus_error_count);
-  Serial.printf("      TX큐 %lu  RX큐 %lu  TX실패 %lu  RX누락 %lu  복구시도 %lu\n",
-                (unsigned long)st.msgs_to_tx, (unsigned long)st.msgs_to_rx,
-                (unsigned long)st.tx_failed_count,
-                (unsigned long)st.rx_missed_count,
-                (unsigned long)canRecoverTry);
-
-  if (fb_count == 0) {
-    if (st.state == TWAI_STATE_BUS_OFF || st.tx_error_counter > 96) {
-      Serial.println("      → ACK 가 전혀 없다. 배선(CAN H/L)·종단저항·트랜시버 전원 확인");
-    } else if (st.state == TWAI_STATE_RUNNING && st.tx_error_counter == 0) {
-      Serial.println("      → 버스는 살아 있고 ACK 도 온다. 모터가 프레임을 무시하는 것이다.");
-      Serial.println("        드라이버 ControlMode 가 MIT(0) 인지, CAN ID 가 1/2 인지 확인");
-    } else {
-      Serial.println("      → 에러 카운터 상승 중. 배선 접촉 불량이 의심된다");
-    }
-  }
-}
-
 void printStatus() {
   Serial.printf("[상태] %s  GAIN=%.2f  DIR(p/r)=%+.0f/%+.0f  IMU=%s\n",
                 armed ? "ARMED" : "STOP", GAIN,
@@ -1051,9 +704,8 @@ void printStatus() {
                 CAN_ID_PITCH, statusName(last_status[CAN_ID_PITCH & 0x03]),
                 CAN_ID_ROLL,  statusName(last_status[CAN_ID_ROLL  & 0x03]));
   if (fb_count == 0) {
-    Serial.println("       !! 피드백 0회 — 아래 [can] 줄로 원인을 가린다");
+    Serial.println("       !! 피드백 0회 — ControlMode 가 MIT 인지, CAN 배선 확인");
   }
-  printCanStatus();
 }
 
 void drainCAN() {
@@ -1157,16 +809,6 @@ void handleLine(const char *raw) {
     ctrlSend(2);
   } else if (u == "z") {
     ctrlSend(4);
-  } else if (u == "cs") {          // 핀 탐색
-    ctrlBusy = true;  canScanPins();  ctrlBusy = false;
-  } else if (u == "cd") {          // dominant 유지 — ct 보다 먼저 검사할 필요 없음
-    ctrlBusy = true;  canHold(true,  15);  ctrlBusy = false;
-  } else if (u == "cr") {          // recessive 유지
-    ctrlBusy = true;  canHold(false, 15);  ctrlBusy = false;
-  } else if (u == "ct") {
-    ctrlBusy = true;
-    canSelfTest();
-    ctrlBusy = false;
   } else if (u == "t") {
     ctrlBusy = true;  if (!ctrlSend(3)) ctrlBusy = false;   // 8초 파서 정지
   /* kpp/kpr/kdp/kdr 은 kp/kd 보다 반드시 먼저 검사한다.
@@ -1362,9 +1004,6 @@ void setup() {
   Serial.println("--------------------------------------------------");
   Serial.println("  arm     활성화        stop  비활성화");
   Serial.println("  t       시험 구동     z     영점 재설정");
-  Serial.println("  ct      CAN 자체 점검 (모터 배제, 트랜시버까지만 확인)");
-  Serial.println("  cd / cr TXD 를 우성/열성으로 15초 유지 — 멀티미터 측정용");
-  Serial.println("  cs      CAN 핀 탐색 — 트랜시버가 붙은 핀 쌍을 찾는다");
   Serial.println("  g<값>   수평 게인     예) g1.0");
   Serial.printf ("  ag<값>  합력 게인     예) ag0.3   현재 %.2f%s\n",
                  ACC_GAIN, ACC_GAIN == 0.0f ? "  ← 0 이면 1단계와 동일" : "");
@@ -1583,13 +1222,6 @@ void ctrlTask(void *arg) {
        */
       Snap sn;
       sn.t     = millis();
-      /* raw : ACC_LPF 를 걸기 전. 이게 없으면 지연을 모터 구간(cmd→act)밖에
-       * 못 재는데, 실측하니 앞단 필터가 ACC_LPF 40ms + CMD_LPF 50ms 로
-       * 모터(85ms)보다 크다. 슬로싱 위상은 물리 가속부터 재야 뜻이 있으므로
-       * 사슬의 원점을 로그에 남긴다.
-       * raw_ref_p/r 은 같은 틱 안의 지역변수라 여기서 그대로 보인다.
-       */
-      sn.raw_p = raw_ref_p;       sn.raw_r = raw_ref_r;
       sn.pre_p = lpf_pitch;       sn.pre_r = lpf_roll;
       sn.pitch = pitch_filtered;  sn.ref_p = ref_pitch;
       sn.zv_p  = shaped_pitch;    sn.cmd_p = cmd_pitch;
@@ -1617,7 +1249,6 @@ void ctrlTask(void *arg) {
 
     if (millis() - lastCheck > 2000) {
       lastCheck = millis();
-      canRecoverTick();     // 버스오프면 복구를 시도한다 (없으면 재부팅해야 한다)
       uint8_t c1 = readReg(REG_CTRL1_XL);
       if (c1 != CTRL1_XL_VAL) {
         err_reset++;
@@ -1655,11 +1286,10 @@ void ioTask(void *arg) {
      * 대기를 만들면 IDLE 태스크가 굶어 워치독이 보드를 리셋시킨다.
      */
     if (xQueueReceive(qSnap, &sn, pdMS_TO_TICKS(5)) == pdTRUE) {
-      Serial.printf("t:%lu,raw_pitch:%.2f,raw_roll:%.2f,"
-                    "pre_pitch:%.2f,pre_roll:%.2f,"
+      Serial.printf("t:%lu,pre_pitch:%.2f,pre_roll:%.2f,"
                     "pitch:%.2f,ref_pitch:%.2f,zv_pitch:%.2f,cmd_pitch:%.2f,act_pitch:%.2f,"
                     "roll:%.2f,ref_roll:%.2f,zv_roll:%.2f,cmd_roll:%.2f,act_roll:%.2f\n",
-                    sn.t, sn.raw_p, sn.raw_r, sn.pre_p, sn.pre_r,
+                    sn.t, sn.pre_p, sn.pre_r,
                     sn.pitch, sn.ref_p, sn.zv_p, sn.cmd_p, sn.act_p,
                     sn.roll,  sn.ref_r, sn.zv_r, sn.cmd_r, sn.act_r);
     }

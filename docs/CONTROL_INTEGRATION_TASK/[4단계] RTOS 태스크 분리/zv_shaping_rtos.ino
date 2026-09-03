@@ -84,6 +84,25 @@
  *     zd<값>  감쇠비 ζ                ★ 0.02     0 ~ 0.9     액체는 보통 0.01~0.05
  *     zm<값>  임펄스 수               ★ 2        2 또는 3    2=ZV, 3=ZVD
  *
+ *   가속 종료 소프트 복귀            기본값      범위        비고
+ *     sr0 / sr1  끄기 / 켜기          ★ 꺼짐                 켜면 ZV 가 자동으로 꺼진다
+ *     sra<값> 가속 인정 문턱 [°]      ★ 1.50     0.2 ~ 10    sre 보다 커야 한다
+ *     sre<값> 종료 판정 문턱 [°]      ★ 0.75     0.05 ~      sra 보다 작아야 한다
+ *     srd<값> 종료 확인 시간 [ms]     ★ 30       10 ~ 200    잠깐 흔들린 것을 걸러낸다
+ *     srh<값> 유지 시간 [ms]          ★ 100      10 ~ 500    ★ 기울어진 채 머무는 시간
+ *     srr<값> 복귀 시간 [ms]          ★ 120      20 ~ 1000   최소저크로 0 까지
+ *
+ *       세 시간이 순서대로 이어진다.
+ *
+ *         가속 중 ── raw_ref < sre ──> srd 확인 ──> srh 유지 ──> srr 복귀 ──> 수평
+ *
+ *       문턱을 둘로 나눈 것은 히스테리시스다. 하나면 문턱 근처에서 켜졌다
+ *       꺼졌다 한다. 판정은 ACC_LPF 를 걸기 전의 raw_ref 로 하고, 유지할
+ *       값은 지금 실제로 나가는 ref 를 잡는다 — 그래서 진입에 계단이 없다.
+ *
+ *       슬로싱 주기(11x11 용기 350mL 에서 456ms) 대비 srh+srr 을 얼마로
+ *       둘지는 물을 올려 재야 한다. 기본값은 실측 전 출발점이다.
+ *
  *   모터                             기본값      범위        올릴 때
  *     kp<값>  강성 — 두 축 함께      ★ 2.0      0 ~ 500     3 은 Kd 0 에서 발산했다
  *     kd<값>  감쇠 — 두 축 함께      ★ 0.13     0 ~ 5       0 은 매뉴얼상 금지
@@ -829,8 +848,12 @@ void printStatus() {
   /* 어느 성형기가 켜져 있는지 한눈에. 둘은 동시에 켜지지 않는다. */
   Serial.printf("       ZV %s   %.2fHz  z=%.3f  %d임펄스  지연 +%.0fms\n",
                 ZV_ON ? "ON " : "OFF", ZV_FREQ, ZV_ZETA, ZV_MODE, zvDelayMs());
-  Serial.printf("       소프트복귀 %s   문턱 %.2f/%.2f°   확인/유지/복귀 %u/%u/%ums\n",
-                SOFT_RETURN_ON ? "ON " : "OFF", SR_ACTIVE_DEG, SR_END_DEG,
+  /* 값마다 어느 명령으로 바꾸는지 이름을 붙여 찍는다. 표를 다시 찾아보지
+   * 않고 바로 고칠 수 있다.
+   */
+  Serial.printf("       소프트복귀 %s   sra %.2f°  sre %.2f°\n",
+                SOFT_RETURN_ON ? "ON " : "OFF", SR_ACTIVE_DEG, SR_END_DEG);
+  Serial.printf("                       srd %ums(확인)  srh %ums(유지)  srr %ums(복귀)\n",
                 SR_DWELL_MS, SR_HOLD_MS, SR_RETURN_MS);
   Serial.printf("       소프트복귀 상태  안쪽 %s / 바깥 %s\n",
                 softReturnPhaseName(srPitch.phase), softReturnPhaseName(srRoll.phase));

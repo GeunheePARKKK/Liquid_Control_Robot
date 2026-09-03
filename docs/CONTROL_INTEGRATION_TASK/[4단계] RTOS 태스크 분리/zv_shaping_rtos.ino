@@ -826,6 +826,14 @@ void printStatus() {
                 KP_PITCH, KP_ROLL, KD_PITCH, KD_ROLL);
   Serial.printf("       ACC_GAIN=%.2f  DIR_ACC=%+.0f  ACC_LPF=%.2f   ref(p/r)=%.2f/%.2f\n",
                 ACC_GAIN, DIR_ACC, ACC_LPF, ref_pitch, ref_roll);
+  /* 어느 성형기가 켜져 있는지 한눈에. 둘은 동시에 켜지지 않는다. */
+  Serial.printf("       ZV %s   %.2fHz  z=%.3f  %d임펄스  지연 +%.0fms\n",
+                ZV_ON ? "ON " : "OFF", ZV_FREQ, ZV_ZETA, ZV_MODE, zvDelayMs());
+  Serial.printf("       소프트복귀 %s   문턱 %.2f/%.2f°   확인/유지/복귀 %u/%u/%ums\n",
+                SOFT_RETURN_ON ? "ON " : "OFF", SR_ACTIVE_DEG, SR_END_DEG,
+                SR_DWELL_MS, SR_HOLD_MS, SR_RETURN_MS);
+  Serial.printf("       소프트복귀 상태  안쪽 %s / 바깥 %s\n",
+                softReturnPhaseName(srPitch.phase), softReturnPhaseName(srRoll.phase));
   Serial.printf("       pitch=%.2f roll=%.2f  cmd(p/r)=%.2f/%.2f  act(p/r)=%.2f/%.2f\n",
                 pitch_filtered, roll_filtered, cmd_pitch, cmd_roll,
                 act_deg[CAN_ID_PITCH & 0x03], act_deg[CAN_ID_ROLL & 0x03]);

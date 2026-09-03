@@ -89,11 +89,6 @@
  *     kd<값>  감쇠 — 두 축 함께      ★ 0.13     0 ~ 5       0 은 매뉴얼상 금지
  *     kpp/kpr 강성 — 안쪽/바깥 따로  ★ 2.0/2.0              예) kpr6
  *     kdp/kdr 감쇠 — 안쪽/바깥 따로  ★ 0.13/0.13            예) kdr0.22
- *     vf1/vf0 속도 피드포워드        ★ 켜짐                  v_des = d(cmd)/dt
- *
- *       vf0 이면 v_des=0 이라 Kd 가 시킨 움직임까지 방해한다. 켜고 끄며
- *       추종률을 비교할 것. 계산상 90°/s 에서 3.3° (진폭의 16%) 차이다.
- *
  *       바깥축이 안쪽보다 81ms 느리다 (189 vs 108ms, 2026-09-01 실측).
  *       관성이 커서 같은 Kp 로는 못 따라온다. kpr 을 올려 지연을 맞출 것.
  *       Kp 를 올리면 Kd 도 sqrt 비율로 같이 올려야 발진하지 않는다.
@@ -210,29 +205,6 @@ volatile int   CAN_DIV         = 2;       // [d]  기본 2      100Hz / 2 = 50Hz
  *   Kp 2.0   드룹 54~82% -> 90%
  *   Kd 0.13  Kd ~ sqrt(Kp+k), k=0.28. 떨림 0.010~0.018도로 여유 있음
  */
-/* ── 속도 피드포워드 ──────────────────────────────────────────────────────
- * MIT 모드 토크는  τ = Kp·(p_des − p) + Kd·(v_des − v) + t_ff  다.
- * v_des 에 0 을 넣으면 감쇠 항이 −Kd·v 가 되어 **우리가 시킨 움직임까지**
- * 방해한다. 브레이크를 밟은 채 운전하는 셈이다.
- *
- *   지령 90°/s = 1.57 rad/s,  Kd 0.22  →  방해 토크 0.35 N·m
- *   Kp 6 에서 이걸 이기려면 위치 오차 0.058 rad = 3.3° 가 필요하다
- *   진폭 20° 대비 16% — 실측 추종률 0.87(13% 부족) 과 거의 맞는다
- *
- * 지령의 미분을 v_des 로 주면 "지금 이 속도가 맞다" 고 알려주는 셈이라,
- * Kd 는 그 궤적에서 벗어난 만큼만 억제한다. 감쇠는 살고 방해만 사라진다.
- * cmd 를 만드는 쪽이 우리이므로 미분을 추정할 필요 없이 정확히 안다.
- *
- * 1단계에서 0 으로 둔 것은 Kp 20 에 계단 지령을 줘서 기구가 튕긴 직후라
- * 감쇠를 최대한 살려두는 것이 우선이었기 때문이다. 이제 슬루가 걸려 있어
- * v_des 가 MAX_RATE 를 넘지 못하므로 풀 만하다.
- */
-volatile bool  VEL_FF  = true;     // [vf] 기본 켜짐. vf0 으로 끄면 예전과 동일
-volatile float VEL_LPF = 0.5f;     // 미분 잡음 완화. 1 이면 필터 없음
-
-/* 계산된 지령 속도 [deg/s]. ctrlTask 가 쓰고 sendBoth 가 읽는다. */
-volatile float vel_pitch = 0, vel_roll = 0;
-
 volatile float KP_PITCH = 2.0f;    // [kpp] 안쪽 0x02
 volatile float KD_PITCH = 0.13f;   // [kdp]
 volatile float KP_ROLL  = 2.0f;    // [kpr] 바깥 0x01 — 올려야 할 쪽
@@ -604,14 +576,8 @@ void broadcastUniversal(uint8_t last) {
  * 의미가 같이 바뀌어 무엇을 보고 있는지 알 수 없게 된다.
  */
 void sendBoth() {
-  /* 위치와 마찬가지로 속도에도 DIR 을 곱한다. 부호를 뒤집으면 도는 방향이
-   * 반대가 되므로 목표 속도의 부호도 같이 뒤집혀야 한다. 빠뜨리면 감쇠가
-   * 도와주는 대신 두 배로 방해한다.
-   */
-  float vp = VEL_FF ? vel_pitch * DIR_PITCH * DEG_TO_RAD : 0.0f;
-  float vr = VEL_FF ? vel_roll  * DIR_ROLL  * DEG_TO_RAD : 0.0f;
-  sendMIT(CAN_ID_PITCH, cmd_pitch * DIR_PITCH * DEG_TO_RAD, vp, KP_PITCH, KD_PITCH, 0.0f);
-  sendMIT(CAN_ID_ROLL,  cmd_roll  * DIR_ROLL  * DEG_TO_RAD, vr, KP_ROLL,  KD_ROLL,  0.0f);
+  sendMIT(CAN_ID_PITCH, cmd_pitch * DIR_PITCH * DEG_TO_RAD, 0.0f, KP_PITCH, KD_PITCH, 0.0f);
+  sendMIT(CAN_ID_ROLL,  cmd_roll  * DIR_ROLL  * DEG_TO_RAD, 0.0f, KP_ROLL,  KD_ROLL,  0.0f);
 }
 
 
@@ -623,7 +589,6 @@ void motorsDisarm(const char *reason) {
   broadcastUniversal(0xFD);
   armed = false;
   cmd_pitch = 0;  cmd_roll = 0;
-  vel_pitch = 0;  vel_roll = 0;
 }
 
 void motorsArm() {
@@ -642,7 +607,6 @@ void motorsArm() {
 
   // enable 전에 목표를 현재 위치(0)로 박아둔다. 빼면 마지막 목표로 확 튄다.
   cmd_pitch = 0;  cmd_roll = 0;
-  vel_pitch = 0;  vel_roll = 0;
   sendBoth();
   delay(50);
 
@@ -1077,8 +1041,6 @@ void printStatus() {
                 DIR_PITCH, DIR_ROLL, imu_ok ? "OK" : "FAULT");
   Serial.printf("       Kp 안쪽 %.2f / 바깥 %.2f    Kd 안쪽 %.3f / 바깥 %.3f\n",
                 KP_PITCH, KP_ROLL, KD_PITCH, KD_ROLL);
-  Serial.printf("       속도FF %s   v_des 안쪽 %+.0f / 바깥 %+.0f °/s\n",
-                VEL_FF ? "ON " : "OFF", vel_pitch, vel_roll);
   Serial.printf("       ACC_GAIN=%.2f  DIR_ACC=%+.0f  ACC_LPF=%.2f   ref(p/r)=%.2f/%.2f\n",
                 ACC_GAIN, DIR_ACC, ACC_LPF, ref_pitch, ref_roll);
   Serial.printf("       pitch=%.2f roll=%.2f  cmd(p/r)=%.2f/%.2f  act(p/r)=%.2f/%.2f\n",
@@ -1211,12 +1173,6 @@ void handleLine(const char *raw) {
    * ag 를 g 보다 먼저 보는 것과 같은 이유로, 순서가 뒤바뀌면 "kpr6" 이
    * kp 접두에 걸려 substring(2)="r6" -> toFloat()=0 으로 조용히 먹힌다.
    */
-  } else if (u.startsWith("vf")) {
-    /* 켜고 끄며 비교하라고 넣었다. vf0 이면 v_des = 0 으로 예전과 같다. */
-    VEL_FF = (s.substring(2).toInt() != 0);
-    Serial.printf(">>> 속도 피드포워드 %s\n", VEL_FF ? "켜짐" : "꺼짐 — v_des = 0");
-    if (!VEL_FF)
-      Serial.println("    Kd 가 시킨 움직임까지 방해합니다 (추종률이 떨어집니다)");
   } else if (u.startsWith("kpp") || u.startsWith("kpr")) {
     bool isP = u.startsWith("kpp");
     float v = s.substring(3).toFloat();
@@ -1414,7 +1370,6 @@ void setup() {
                  ACC_GAIN, ACC_GAIN == 0.0f ? "  ← 0 이면 1단계와 동일" : "");
   Serial.println("  ad<값>  합력 필터     예) ad0.2");
   Serial.println("  kp<값>  모터 강성     kd<값>  모터 감쇠   (두 축 함께)");
-  Serial.printf ("  vf1/vf0 속도 피드포워드   현재 %s\n", VEL_FF ? "켜짐" : "꺼짐");
   Serial.printf ("  kpp/kpr kdp/kdr 축별   현재 Kp %.2f/%.2f  Kd %.3f/%.3f (안/바깥)\n",
                  KP_PITCH, KP_ROLL, KD_PITCH, KD_ROLL);
   Serial.println("  f<값>   지령 필터     d<값>   CAN 분주     ?  상태");
@@ -1602,18 +1557,8 @@ void ctrlTask(void *arg) {
     lpf_roll  = CMD_LPF * want_roll  + (1.0f - CMD_LPF) * lpf_roll;
 
     const float maxStep = MAX_RATE * dt;
-    float prev_p = cmd_pitch, prev_r = cmd_roll;
     cmd_pitch = slew(lpf_pitch, cmd_pitch, maxStep);
     cmd_roll  = slew(lpf_roll,  cmd_roll,  maxStep);
-
-    /* 지령 속도 = 지령의 미분. 슬루 뒤에서 재므로 MAX_RATE 를 넘지 않는다.
-     * 슬루가 걸리는 동안은 정확히 ±MAX_RATE 인 계단이 되므로 가볍게 거른다.
-     * 세게 거르면 피드포워드가 늦어져 넣는 의미가 없다.
-     */
-    float raw_vp = (cmd_pitch - prev_p) / dt;
-    float raw_vr = (cmd_roll  - prev_r) / dt;
-    vel_pitch = VEL_LPF * raw_vp + (1.0f - VEL_LPF) * vel_pitch;
-    vel_roll  = VEL_LPF * raw_vr + (1.0f - VEL_LPF) * vel_roll;
 
     static int div_cnt = 0;
     if (armed && (++div_cnt >= CAN_DIV)) {

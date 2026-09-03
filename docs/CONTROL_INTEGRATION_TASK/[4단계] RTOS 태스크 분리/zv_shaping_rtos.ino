@@ -267,6 +267,36 @@ int   zv_n1 = 21;                       // 반주기 [샘플]
 float zv_A1 = 0.5f, zv_A2 = 0.5f, zv_A3 = 0.0f;
 float shaped_pitch = 0, shaped_roll = 0;
 
+/* ── 가속 종료 소프트 복귀 ────────────────────────────────────────────────
+ * 액체는 과거 가속도의 상태를 갖지만 직접보상 목표각은 현재 가속도가 0 이면
+ * 곧바로 0 으로 사라진다. 가속 종료 때 남아 있는 ref 를 잠시 유지한 뒤
+ * 최소저크 곡선으로 0 까지 보내, 트레이의 급정지가 새 슬로싱을 만드는 것을
+ * 줄인다. 시작 구간은 건드리지 않으므로 직접보상의 빠른 반응은 그대로다.
+ *
+ * ZV 와 목적이 겹치므로 동시에 사용하지 않는다. 기본은 OFF 이고 sr1 로 켠다.
+ * 각 축은 독립적으로 종료를 검출한다.
+ */
+volatile bool     SOFT_RETURN_ON = false;   // [sr]  기본 꺼짐
+volatile float    SR_ACTIVE_DEG  = 1.50f;   // [sra] 이 이상을 실제 가속으로 인정
+volatile float    SR_END_DEG     = 0.75f;   // [sre] 이 아래가 지속되면 종료
+volatile uint16_t SR_DWELL_MS    = 30;      // [srd] 종료 확인 시간
+volatile uint16_t SR_HOLD_MS     = 100;     // [srh] 남은 반대 목표각 유지 시간
+volatile uint16_t SR_RETURN_MS   = 120;     // [srr] 최소저크 수평 복귀 시간
+
+enum SoftReturnPhase : uint8_t { SR_DIRECT, SR_HOLD, SR_RETURN, SR_LEVEL };
+
+struct SoftReturnAxis {
+  SoftReturnPhase phase;
+  bool sawActive;
+  uint16_t quietTicks;
+  uint16_t phaseTicks;
+  float holdAngle;
+};
+
+SoftReturnAxis srPitch = {SR_DIRECT, false, 0, 0, 0};
+SoftReturnAxis srRoll  = {SR_DIRECT, false, 0, 0, 0};
+volatile bool srResetRequest = false;
+
 /* 폭주 차단 — 지령은 ±LIMIT_DEG 를 넘지 않으므로 실제 위치가 이 값을 넘으면
  * 우리가 시킨 움직임이 아니다.
  */
@@ -413,6 +443,103 @@ volatile uint32_t dgTxFail = 0, dgSnapDrop = 0, dgEvtDrop = 0, dgCmdDrop = 0;
 portMUX_TYPE zvMux = portMUX_INITIALIZER_UNLOCKED;
 #define ZV_LOCK()    taskENTER_CRITICAL(&zvMux)
 #define ZV_UNLOCK()  taskEXIT_CRITICAL(&zvMux)
+
+uint16_t msToCtrlTicks(uint16_t ms) {
+  uint16_t ticks = (uint16_t)((ms + 9U) / 10U);
+  return ticks > 0 ? ticks : 1;
+}
+
+void softReturnResetAxis(SoftReturnAxis &s) {
+  s.phase = SR_DIRECT;
+  s.sawActive = false;
+  s.quietTicks = 0;
+  s.phaseTicks = 0;
+  s.holdAngle = 0;
+}
+
+void softReturnReset() {
+  softReturnResetAxis(srPitch);
+  softReturnResetAxis(srRoll);
+}
+
+const char *softReturnPhaseName(SoftReturnPhase phase) {
+  switch (phase) {
+    case SR_HOLD:   return "HOLD";
+    case SR_RETURN: return "RETURN";
+    case SR_LEVEL:  return "LEVEL";
+    default:        return "DIRECT";
+  }
+}
+
+/* 가속이 사라진 뒤 ACC_LPF 에 남은 값은 30ms 에 약 51%(alpha=0.2)가 된다.
+ * 그 순간 값을 그대로 잡으므로 상태 진입 때 목표각 계단이 생기지 않는다.
+ */
+float softReturnStep(float ref, float rawRef, SoftReturnAxis &s) {
+  float a = fabsf(rawRef);
+  uint16_t dwellTicks  = msToCtrlTicks(SR_DWELL_MS);
+  uint16_t holdTicks   = msToCtrlTicks(SR_HOLD_MS);
+  uint16_t returnTicks = msToCtrlTicks(SR_RETURN_MS);
+
+  /* 새 가속은 꼬리 파형보다 우선한다. CMD_LPF 와 slew 가 전환 계단을 제한한다. */
+  if (s.phase != SR_DIRECT && a >= SR_ACTIVE_DEG) {
+    softReturnResetAxis(s);
+    s.sawActive = true;
+    return ref;
+  }
+
+  if (s.phase == SR_DIRECT) {
+    if (a >= SR_ACTIVE_DEG) {
+      s.sawActive = true;
+      s.quietTicks = 0;
+    } else if (s.sawActive) {
+      if (a <= SR_END_DEG) {
+        if (s.quietTicks < 0xFFFF) s.quietTicks++;
+        if (s.quietTicks >= dwellTicks) {
+          s.quietTicks = 0;
+          s.phaseTicks = 0;
+          s.holdAngle = ref;       // 현재 출력과 같아 진입 시 불연속이 없다
+          if (fabsf(s.holdAngle) >= 0.15f) s.phase = SR_HOLD;
+          else {
+            s.phase = SR_LEVEL;
+            s.sawActive = false;
+          }
+        }
+      } else {
+        s.quietTicks = 0;
+      }
+    }
+    return ref;
+  }
+
+  if (s.phase == SR_HOLD) {
+    if (++s.phaseTicks >= holdTicks) {
+      s.phase = SR_RETURN;
+      s.phaseTicks = 0;
+    }
+    return s.holdAngle;
+  }
+
+  if (s.phase == SR_RETURN) {
+    if (s.phaseTicks < returnTicks) s.phaseTicks++;
+    float x = constrain((float)s.phaseTicks / (float)returnTicks, 0.0f, 1.0f);
+    float smooth = x * x * x * (10.0f + x * (-15.0f + 6.0f * x));
+    float out = s.holdAngle * (1.0f - smooth);
+    if (s.phaseTicks >= returnTicks) {
+      s.phase = SR_LEVEL;
+      s.sawActive = false;
+      s.holdAngle = 0;
+      out = 0;
+    }
+    return out;
+  }
+
+  /* LEVEL 동안 ref 는 백그라운드에서 거의 0 으로 수렴한다. */
+  if (a >= SR_ACTIVE_DEG) {
+    softReturnResetAxis(s);
+    s.sawActive = true;
+  }
+  return ref;
+}
 
 /* ctrlTask 쪽 출력. 이벤트 전용 큐라 샘플에 밀리지 않는다. 드문 일이므로
  * 5ms 까지는 기다린다 — 원본도 printf 가 막혔으므로 동작이 같다.
@@ -590,6 +717,7 @@ void motorsDisarm(const char *reason) {
   broadcastUniversal(0xFD);
   armed = false;
   cmd_pitch = 0;  cmd_roll = 0;
+  softReturnReset();
 }
 
 void motorsArm() {
@@ -608,6 +736,7 @@ void motorsArm() {
 
   // enable 전에 목표를 현재 위치(0)로 박아둔다. 빼면 마지막 목표로 확 튄다.
   cmd_pitch = 0;  cmd_roll = 0;
+  softReturnReset();
   sendBoth();
   delay(50);
 
@@ -866,6 +995,52 @@ void handleLine(const char *raw) {
                   isP ? "PITCH" : "ROLL", d, isP ? "안쪽" : "바깥");
     Serial.println("    기울였을 때 트레이가 반대로 돌면 맞습니다");
     if (armed) Serial.println("    !! ARMED 상태 — 지령이 반대편으로 이동합니다");
+  } else if (u.startsWith("sra")) {
+    float v = s.substring(3).toFloat();
+    if (v >= 0.2f && v <= 10.0f && v > SR_END_DEG) {
+      SR_ACTIVE_DEG = v;  srResetRequest = true;
+      Serial.printf(">>> SOFT_RETURN active = %.2f°\n", SR_ACTIVE_DEG);
+    } else Serial.println("!! sra 범위 0.2 ~ 10°, sre 보다 커야 합니다");
+  } else if (u.startsWith("sre")) {
+    float v = s.substring(3).toFloat();
+    if (v >= 0.05f && v < SR_ACTIVE_DEG) {
+      SR_END_DEG = v;  srResetRequest = true;
+      Serial.printf(">>> SOFT_RETURN end = %.2f°\n", SR_END_DEG);
+    } else Serial.println("!! sre 범위 0.05° 이상, sra 보다 작아야 합니다");
+  } else if (u.startsWith("srd")) {
+    int v = s.substring(3).toInt();
+    if (v >= 10 && v <= 200) {
+      SR_DWELL_MS = (uint16_t)v;  srResetRequest = true;
+      Serial.printf(">>> SOFT_RETURN 종료 확인 = %ums\n", SR_DWELL_MS);
+    } else Serial.println("!! srd 범위 10 ~ 200ms");
+  } else if (u.startsWith("srh")) {
+    int v = s.substring(3).toInt();
+    if (v >= 10 && v <= 500) {
+      SR_HOLD_MS = (uint16_t)v;  srResetRequest = true;
+      Serial.printf(">>> SOFT_RETURN 유지 = %ums\n", SR_HOLD_MS);
+    } else Serial.println("!! srh 범위 10 ~ 500ms");
+  } else if (u.startsWith("srr")) {
+    int v = s.substring(3).toInt();
+    if (v >= 20 && v <= 1000) {
+      SR_RETURN_MS = (uint16_t)v;  srResetRequest = true;
+      Serial.printf(">>> SOFT_RETURN 복귀 = %ums\n", SR_RETURN_MS);
+    } else Serial.println("!! srr 범위 20 ~ 1000ms");
+  } else if (u.startsWith("sr")) {
+    bool srOn = (s.substring(2).toInt() != 0);
+    ZV_LOCK();
+    SOFT_RETURN_ON = srOn;
+    if (srOn) {
+      ZV_ON = false;               // 두 성형기를 겹치지 않는다
+      zvClear();
+    }
+    ZV_UNLOCK();
+    srResetRequest = true;
+    Serial.printf(">>> SOFT_RETURN %s  active/end=%.2f/%.2f°  dwell/hold/return=%u/%u/%ums%s\n",
+                  SOFT_RETURN_ON ? "켜짐" : "꺼짐", SR_ACTIVE_DEG, SR_END_DEG,
+                  SR_DWELL_MS, SR_HOLD_MS, SR_RETURN_MS,
+                  srOn ? "  (ZV 자동 꺼짐)" : "");
+  } else if (u.startsWith("zv")) {
+    /* 문자열 변환을 락 밖에서 먼저 끝낸다. 임계구역 안에서 String 을 만들면
   } else if (u.startsWith("zv")) {
     /* 문자열 변환을 락 밖에서 먼저 끝낸다. 임계구역 안에서 String 을 만들면
      * 인터럽트가 막힌 채로 힙을 건드리게 된다.
@@ -873,7 +1048,11 @@ void handleLine(const char *raw) {
     bool zvOn = (s.substring(2).toInt() != 0);
     ZV_LOCK();
     ZV_ON = zvOn;
-    if (zvOn) zvClear();          // 낡은 값이 섞여 첫 순간 튀는 것을 막는다
+    if (zvOn) {
+      SOFT_RETURN_ON = false;     // 두 성형기를 겹치지 않는다
+      srResetRequest = true;
+      zvClear();                  // 낡은 값이 섞여 첫 순간 튀는 것을 막는다
+    }
     ZV_UNLOCK();
     Serial.printf(">>> ZV %s   %.2fHz  z=%.3f  %d임펄스  지연 +%.0fms\n",
                   ZV_ON ? "켜짐" : "꺼짐 — 2단계와 동일",
@@ -932,7 +1111,7 @@ void handleLine(const char *raw) {
   } else if (u == "?") {
     printStatus();
   } else {
-    Serial.println("명령: arm/stop/z/t/q/g/ag/ad/kp/kd/f/r/d/dp/dr/zv/zf/zd/zm/?");
+    Serial.println("명령: arm/stop/z/t/q/g/ag/ad/kp/kd/f/r/d/dp/dr/zv/zf/zd/zm/sr/sra/sre/srd/srh/srr/?");
   }
 }
 
@@ -1071,6 +1250,12 @@ void ctrlTask(void *arg) {
       }
     }
 
+    /* ioTask 는 설정만 바꾸고, 축별 상태는 ctrlTask 하나만 초기화·갱신한다. */
+    if (srResetRequest || !SOFT_RETURN_ON) {
+      softReturnReset();
+      srResetRequest = false;
+    }
+
     /* 여기서부터 잰다. arm 의 delay 250ms 는 원본에도 있는 의도된 정지라
      * 같이 세면 "제어 틱이 늦었나"를 볼 수가 없다 (실측 270ms 로 찍혔다).
      */
@@ -1171,7 +1356,10 @@ void ctrlTask(void *arg) {
     zv_p[zv_head] = ref_pitch;
     zv_r[zv_head] = ref_roll;
 
-    if (ZV_ON) {
+    if (SOFT_RETURN_ON) {
+      shaped_pitch = softReturnStep(ref_pitch, raw_ref_p, srPitch);
+      shaped_roll  = softReturnStep(ref_roll,  raw_ref_r, srRoll);
+    } else if (ZV_ON) {
       int i1 = (zv_head - zv_n1       + ZV_BUF) % ZV_BUF;
       int i2 = (zv_head - 2 * zv_n1   + ZV_BUF) % ZV_BUF;
       shaped_pitch = zv_A1 * zv_p[zv_head] + zv_A2 * zv_p[i1] + zv_A3 * zv_p[i2];

@@ -25,6 +25,7 @@
 | [모터 피드포워드 — `v_des` + `t_ff = J·θ̈`](#모터-피드포워드) |
 | [피드포워드 실측 — 모터 70 → 25 ms, 기본 켜짐](#피드포워드-실측) |
 | [수위 센서 로그 필드 `lvl:` 추가](#수위-센서-로그) |
+| [와이파이판 `WIFI_이용/zv_shaping_wifi.ino` 추가](#와이파이판) |
 
 ---
 
@@ -1309,3 +1310,53 @@ OUT → GPIO 1 (ADC)    VCC → GPIO 2 (읽을 때만 HIGH)    GND → GND
 - ADC 는 ctrlTask 만 만진다 (TWAI·I2C 와 같은 규칙).
 - `Snap` 에 `lvl` 추가, 로그 줄 **맨 끝**에 붙여 기존 필드 순서는 그대로
   (check_tuning.py 영향 없음).
+
+---
+
+## 와이파이판
+
+`HASH` · 2026-09-06 03:49 푸시
+
+`WIFI_이용/zv_shaping_wifi.ino` — 이 스케치의 무선판. 제어 코드는 한 줄도 안 다르다.
+같은 폴더에 `capture_wifi.py` (capture.py 의 TCP 판).
+
+### 왜
+
+주행부가 붙으면 노트북을 떼야 한다. 시리얼 모니터로 하던 것 — 로그 받기,
+명령 치기, capture.py — 을 그대로 무선으로 하고 싶다.
+
+### 어떻게
+
+- 보드가 직접 와이파이 AP 를 띄운다: **SSID `Liquid_Robot` / 비밀번호 `liquid1234` / IP 192.168.4.1**.
+  공유기가 없어도 된다. 부품·배선 추가 없음.
+- **TCP 포트 23** 에 붙으면 시리얼 모니터와 같은 줄이 오간다. 명령도 같다.
+  PuTTY(Raw), 휴대폰 TCP 터미널 앱, `capture_wifi.py` 전부 됨.
+- USB 시리얼은 그대로 살아 있다. 출력은 둘 다에, 입력은 어느 쪽이든.
+- **OTA**: Arduino IDE 포트 목록에 `liquid-robot at 192.168.4.1` 이 뜬다.
+  업로드가 시작되면 모터를 먼저 끈다 (`ArduinoOTA.onStart → ctrlSend(2)`).
+- TCP 로 붙어도 보드가 리셋되지 않는다. 걸어둔 설정이 남는다.
+
+### 구조 — ctrlTask 에 영향 없음
+
+Serial 을 만지는 곳은 원래부터 ioTask 하나였다 (handleLine, printStatus,
+샘플·이벤트 출력). ctrlTask 는 qprintf 로 큐에 넣기만 한다. 그래서 출력 대상을
+"USB + TCP" 로 바꾸는 `DualOut` 도 ioTask 안에서만 불린다. `Serial.print*` 93곳을
+`Out.print*` 로 바꿨고, ioTask 에 TCP 수락·TCP 입력 파서·`ArduinoOTA.handle()` 을
+넣었다. 와이파이 스택은 core 0, ioTask 도 core 0. ctrlTask(core 1, 100Hz) 는 그대로.
+
+TCP 쓰기는 `send(MSG_DONTWAIT)` — 상대가 느려 버퍼가 차면 그 줄을 버린다
+(`?` 의 "버림 N바이트"). ioTask 가 몇 초 멈추는 것보다 낫다.
+ioTask 스택 6144 → 8192.
+
+### 전원 — 반드시
+
+와이파이 송신 순간 3.3V 에서 최대 500mA. **5V ≥ 1A 를 보드 5V/VIN 에** 넣어
+내장 레귤레이터를 쓴다. 외부 3.3V 소형 레귤레이터로 직접 넣으면 전송 때마다
+처져서 리셋되거나 CAN 트랜시버가 브라운아웃된다 (전에 겪은 그 증상).
+
+### 로컬에서 열 때
+
+Arduino IDE 는 폴더 이름 = 스케치 이름을 요구한다. `zv_shaping_wifi` 폴더에
+넣고 열 것. `Tools → USB CDC On Boot = Enabled` 는 새 폴더마다 다시.
+
+빌드 크기 793KB (60%). 와이파이·OTA 몫으로 약 460KB 늘었다. 기본 파티션에 들어간다.

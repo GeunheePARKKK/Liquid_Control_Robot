@@ -1315,7 +1315,7 @@ OUT → GPIO 1 (ADC)    VCC → GPIO 2 (읽을 때만 HIGH)    GND → GND
 
 ## 와이파이판
 
-`HASH` · 2026-09-06 03:49 푸시
+`5f825d5` · 2026-09-06 03:49 푸시
 
 `WIFI_이용/zv_shaping_wifi.ino` — 이 스케치의 무선판. 제어 코드는 한 줄도 안 다르다.
 같은 폴더에 `capture_wifi.py` (capture.py 의 TCP 판).

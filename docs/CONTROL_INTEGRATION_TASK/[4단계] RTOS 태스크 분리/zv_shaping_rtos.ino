@@ -148,6 +148,21 @@
 #define CAN_TX_PIN  GPIO_NUM_4
 #define CAN_RX_PIN  GPIO_NUM_5
 
+/* ── 수위 센서 (2026-09-05) ────────────────────────────────────────────────
+ * 메카솔루션 저항식 수위센서 (60x20mm, 핀 OUT/VCC/GND). 용기 앞벽 근처에
+ * 수직으로 담가 둔다. 값은 젖은 길이에 비례한다 — 마른 상태 ~1070, 다 잠기면
+ * ~2050. 정지 수면이 감지 범위 가운데(1400~1600)에 오게 높이를 맞춘다.
+ *
+ * 일단 로그(lvl:)에만 싣는다. 제어에는 안 쓴다. 카트를 밀 때 이 값에
+ * 슬로싱(약 3Hz)이 찍히는지부터 본다. 찍히면 위상 센서로 쓸 수 있다.
+ *
+ * VCC 를 GPIO 로 주고 읽는 300µs 만 켠다. 전원이 계속 걸린 채 물에 두면
+ * 빗살이 전기분해로 며칠 만에 죽는다. 켜져 있는 시간 3%.
+ * 단발 글리치가 0.8% 나와서 3점 중앙값을 건다.
+ */
+#define PIN_LVL_OUT  1       // ADC
+#define PIN_LVL_PWR  2       // 읽을 때만 HIGH
+
 /* 제어모드 접두.  CAN ID = (모드 << 8) | 모터ID
  *   0x000 = MIT,  0x100 = 위치/속도,  0x200 = 속도
  */
@@ -505,6 +520,7 @@ struct Snap {
   float raw_p, raw_r;              // ACC_LPF 를 걸기 전의 합력 목표각
   float pre_p, pre_r, pitch, ref_p, zv_p, cmd_p, act_p;
   float roll, ref_r, zv_r, cmd_r, act_r;
+  int   lvl;                       // 수위 센서 (글리치 제거본)
 };
 
 /* 큐를 둘로 나눈다.
@@ -781,6 +797,19 @@ void readIMU(int16_t &ax, int16_t &ay, int16_t &az,
   az = (int16_t)((b[11] << 8) | b[10]);
 }
 
+volatile int lvl_med = 0;        // 수위 (3점 중앙값)
+static int   lvl_hist[3] = {0, 0, 0};
+
+void readLevel() {
+  digitalWrite(PIN_LVL_PWR, HIGH);
+  delayMicroseconds(300);              // 분압 정착
+  int v = analogRead(PIN_LVL_OUT);
+  digitalWrite(PIN_LVL_PWR, LOW);
+  lvl_hist[0] = lvl_hist[1]; lvl_hist[1] = lvl_hist[2]; lvl_hist[2] = v;
+  int a = lvl_hist[0], b = lvl_hist[1], c = lvl_hist[2];
+  lvl_med = max(min(a, b), min(max(a, b), c));
+}
+
 void configSensor() {
   writeReg(REG_CTRL3_C, 0x01);          // 소프트 리셋
   delay(50);
@@ -1012,6 +1041,7 @@ void printStatus() {
                 force_pitch, force_roll,
                 accGatePitch.active ? "BLOCK" : "TRACK",
                 accGateRoll.active  ? "BLOCK" : "TRACK");
+  Serial.printf("       수위센서 %d   (마름 ~1070 / 잠김 ~2050. 정지 시 1400~1600 이 되게 높이 조절)\n", lvl_med);
   Serial.printf("       소프트복귀 %s   sra %.2f°  sre %.2f°\n",
                 SOFT_RETURN_ON ? "ON " : "OFF", SR_ACTIVE_DEG, SR_END_DEG);
   Serial.printf("                       srd %ums(확인)  srh %ums(유지)  srr %ums(복귀)\n",
@@ -1331,6 +1361,11 @@ void setup() {
   Serial.begin(115200);
   delay(2000);
 
+  // ── 수위 센서 ──
+  pinMode(PIN_LVL_PWR, OUTPUT);
+  digitalWrite(PIN_LVL_PWR, LOW);
+  analogReadResolution(12);
+
   // ── I2C ──
   Wire.begin(PIN_SDA, PIN_SCL, I2C_HZ);
   Wire.setTimeOut(50);            // 응답 없을 때 멈추지 않게
@@ -1477,6 +1512,7 @@ void ctrlTask(void *arg) {
     // ── 1. 자세 추정 ──
     int16_t ax, ay, az, gx, gy, gz;
     readIMU(ax, ay, az, gx, gy, gz);
+    readLevel();                              // 수위 센서. 로그용
 
     float rate_pitch = ((float)gx - gyro_bias_x) / GYRO_LSB;
     float rate_roll  = ((float)gy - gyro_bias_y) / GYRO_LSB;
@@ -1658,6 +1694,7 @@ void ctrlTask(void *arg) {
       sn.roll  = roll_filtered;   sn.ref_r = ref_roll;
       sn.zv_r  = shaped_roll;     sn.cmd_r = cmd_roll;
       sn.act_r = act_deg[CAN_ID_ROLL  & 0x03] * DIR_ROLL;
+      sn.lvl   = lvl_med;
       if (xQueueSend(qSnap, &sn, 0) != pdTRUE) dgSnapDrop = dgSnapDrop + 1;
     }
 
@@ -1718,10 +1755,10 @@ void ioTask(void *arg) {
       Serial.printf("t:%lu,raw_pitch:%.2f,raw_roll:%.2f,"
                     "pre_pitch:%.2f,pre_roll:%.2f,"
                     "pitch:%.2f,ref_pitch:%.2f,zv_pitch:%.2f,cmd_pitch:%.2f,act_pitch:%.2f,"
-                    "roll:%.2f,ref_roll:%.2f,zv_roll:%.2f,cmd_roll:%.2f,act_roll:%.2f\n",
+                    "roll:%.2f,ref_roll:%.2f,zv_roll:%.2f,cmd_roll:%.2f,act_roll:%.2f,lvl:%d\n",
                     sn.t, sn.raw_p, sn.raw_r, sn.pre_p, sn.pre_r,
                     sn.pitch, sn.ref_p, sn.zv_p, sn.cmd_p, sn.act_p,
-                    sn.roll,  sn.ref_r, sn.zv_r, sn.cmd_r, sn.act_r);
+                    sn.roll,  sn.ref_r, sn.zv_r, sn.cmd_r, sn.act_r, sn.lvl);
     }
 
     /* 문자 단위로 모은다. readStringUntil 은 개행이 올 때까지 기본 1초를

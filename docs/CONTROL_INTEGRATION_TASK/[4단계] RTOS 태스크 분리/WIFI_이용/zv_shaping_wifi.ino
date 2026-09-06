@@ -182,6 +182,7 @@
 WiFiServer tcpServer(TCP_PORT);
 WiFiClient tcpClient;
 volatile uint32_t dgTcpDrop = 0;    // TCP 버퍼가 차서 버린 바이트
+bool canOk = false;                 // twai 설치·시작 성공 여부 (setup 에서 확정)
 
 /* USB 와 TCP 에 같이 쓰는 출력. print/printf/println 이 전부 여기로 온다.
  * ioTask(core 0) 에서만 불린다.
@@ -1432,16 +1433,6 @@ void setup() {
   Serial.begin(115200);
   delay(2000);
 
-  // ── 와이파이 AP + TCP + OTA ──
-  WiFi.mode(WIFI_AP);
-  WiFi.softAP(WIFI_SSID, WIFI_PASS);
-  tcpServer.begin();
-  tcpServer.setNoDelay(true);
-  ArduinoOTA.setHostname(OTA_HOST);
-  ArduinoOTA.onStart([]() { ctrlSend(2); });     // 업로드 전 모터 끄기
-  ArduinoOTA.begin();
-  Out.printf("=== 와이파이 AP  SSID %s  비밀번호 %s  IP %s  TCP %d  OTA %s ===\n",
-             WIFI_SSID, WIFI_PASS, WiFi.softAPIP().toString().c_str(), TCP_PORT, OTA_HOST);
 
   // ── 수위 센서 ──
   pinMode(PIN_LVL_PWR, OUTPUT);
@@ -1492,14 +1483,34 @@ void setup() {
   }
   accelGateReset();
 
-  // ── CAN ──
+  // ── CAN — 와이파이보다 먼저 ──
+  /* ESP32-S3 에서 와이파이가 먼저 올라오면 인터럽트 슬롯을 차지해
+   * twai_driver_install 이 실패할 수 있다. 그러면 CAN 만 조용히 죽고
+   * IMU·로그·명령은 멀쩡해서 "t 를 쳐도 모터가 안 움직인다" 가 된다.
+   * 그래서 CAN 을 먼저 설치하고, 결과를 반드시 찍는다.
+   */
   twai_general_config_t g = TWAI_GENERAL_CONFIG_DEFAULT(CAN_TX_PIN, CAN_RX_PIN, TWAI_MODE_NORMAL);
   twai_timing_config_t  t = TWAI_TIMING_CONFIG_1MBITS();
   twai_filter_config_t  f = TWAI_FILTER_CONFIG_ACCEPT_ALL();
-  twai_driver_install(&g, &t, &f);
-  twai_start();
+  esp_err_t e1 = twai_driver_install(&g, &t, &f);
+  esp_err_t e2 = (e1 == ESP_OK) ? twai_start() : ESP_FAIL;
+  canOk = (e1 == ESP_OK && e2 == ESP_OK);
+  Out.printf("=== CAN 드라이버 %s  (install=%s, start=%s) ===@@",
+             canOk ? "OK" : "!! 실패 — 모터 명령이 나가지 않습니다",
+             esp_err_to_name(e1), esp_err_to_name(e2));
   delay(100);
-  broadcastUniversal(0xFD);        // 부팅 시 비활성
+  if (canOk) broadcastUniversal(0xFD);   // 부팅 시 비활성
+
+  // ── 와이파이 AP + TCP + OTA ──
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(WIFI_SSID, WIFI_PASS);
+  tcpServer.begin();
+  tcpServer.setNoDelay(true);
+  ArduinoOTA.setHostname(OTA_HOST);
+  ArduinoOTA.onStart([]() { ctrlSend(2); });     // 업로드 전 모터 끄기
+  ArduinoOTA.begin();
+  Out.printf("=== 와이파이 AP  SSID %s  비밀번호 %s  IP %s  TCP %d  OTA %s ===\n",
+             WIFI_SSID, WIFI_PASS, WiFi.softAPIP().toString().c_str(), TCP_PORT, OTA_HOST);
 
   zvRecalc();
   lastLoop = micros();
@@ -1804,11 +1815,29 @@ void ctrlTask(void *arg) {
         configSensor();
         motorsDisarm("센서 리셋");
       }
-      qprintf("[stat] %s Kp=%.1f Kd=%.2f 모터P=%s R=%s 피드백:%lu | 무보정:%lu/%lu I2C오류:%lu\n",
+      twai_status_info_t ts = {};
+      const char *canState = "미설치";
+      if (canOk && twai_get_status_info(&ts) == ESP_OK) {
+        canState = (ts.state == TWAI_STATE_RUNNING)    ? "RUNNING" :
+                   (ts.state == TWAI_STATE_BUS_OFF)    ? "BUS_OFF" :
+                   (ts.state == TWAI_STATE_RECOVERING) ? "RECOVERING" : "STOPPED";
+      }
+      qprintf("[stat] %s Kp=%.1f Kd=%.2f 모터P=%s R=%s 피드백:%lu | CAN %s TX오류 %lu RX오류 %lu TX실패 %lu | 무보정:%lu/%lu I2C오류:%lu\n",
                     armed ? "ARMED" : "STOP", KP_PITCH, KD_PITCH,
                     statusName(last_status[CAN_ID_PITCH & 0x03]),
                     statusName(last_status[CAN_ID_ROLL  & 0x03]),
-                    fb_count, err_win, n_win, i2c_err);
+                    fb_count, canState, (unsigned long)ts.tx_error_counter, (unsigned long)ts.rx_error_counter,
+                    (unsigned long)dgTxFail, err_win, n_win, i2c_err);
+      /* 버스오프면 여기(ctrlTask)에서 복구를 건다. ioTask 에서 걸면 안 된다 —
+       * twai 는 ctrlTask 만 만진다는 규칙이고, 전에 그걸 어겨 크래시가 났다.
+       */
+      if (canOk && ts.state == TWAI_STATE_BUS_OFF) {
+        twai_initiate_recovery();
+        qprintln("!! CAN BUS_OFF — 복구 시작");
+      } else if (canOk && ts.state == TWAI_STATE_STOPPED) {
+        twai_start();
+        qprintln("!! CAN STOPPED — 재시작");
+      }
 #if RTOS_DIAG
       qprintf("[rtos] 최대틱 %luus  10ms초과 %lu  재동기 %lu | "
               "TX실패 %lu 샘플드롭 %lu 이벤트드롭 %lu 명령드롭 %lu\n",

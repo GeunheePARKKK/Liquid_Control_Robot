@@ -26,6 +26,7 @@
 | [피드포워드 실측 — 모터 70 → 25 ms, 기본 켜짐](#피드포워드-실측) |
 | [수위 센서 로그 필드 `lvl:` 추가](#수위-센서-로그) |
 | [와이파이판 `WIFI_이용/zv_shaping_wifi.ino` 추가](#와이파이판) |
+| [와이파이판: CAN 을 와이파이보다 먼저 설치, 설치 결과 확인](#와이파이판-can-설치-순서) |
 
 ---
 
@@ -1360,3 +1361,33 @@ Arduino IDE 는 폴더 이름 = 스케치 이름을 요구한다. `zv_shaping_wi
 넣고 열 것. `Tools → USB CDC On Boot = Enabled` 는 새 폴더마다 다시.
 
 빌드 크기 793KB (60%). 와이파이·OTA 몫으로 약 460KB 늘었다. 기본 파티션에 들어간다.
+
+---
+
+## 와이파이판 CAN 설치 순서
+
+`HASH` · 2026-09-07 02:59 푸시 · `WIFI_이용/zv_shaping_wifi.ino` 만
+
+### 증상
+
+와이파이판에서 로그·명령은 다 되는데 `t` 를 쳐도 모터가 안 움직였다. 같은 USB 전원,
+같은 배선으로 `motor_test_MIT.ino` 는 잘 돌았다. CAN 경로(범위·ID·enable 순서·프레임)는
+두 스케치가 같다.
+
+### 원인 (추정, 코드에서 확인)
+
+`setup()` 이 **와이파이를 먼저 켜고 CAN 드라이버를 나중에** 설치했다. ESP32-S3 에서
+와이파이가 인터럽트 슬롯을 먼저 차지하면 `twai_driver_install` 이 실패할 수 있는데,
+반환값을 확인하지 않아 CAN 만 조용히 죽고 나머지는 멀쩡했다.
+
+### 조치
+
+- CAN 설치를 와이파이보다 **앞으로**. `twai_driver_install`·`twai_start` 반환값을 확인해
+  부팅 배너에 `=== CAN 드라이버 OK / 실패 (install=…, start=…) ===` 로 찍는다.
+- `[stat]` 줄에 CAN 상태(RUNNING/BUS_OFF/STOPPED), TX/RX 오류 카운터, TX 실패 수 추가.
+- `[stat]` 주기에 BUS_OFF 면 `twai_initiate_recovery()`, STOPPED 면 `twai_start()` —
+  **ctrlTask 안에서**. 전에 ioTask 에서 걸어 크래시 났던 그 기능을 올바른 자리에 넣었다.
+
+### 확인 방법
+
+업로드 후 부팅 배너의 CAN 줄과, `t` 실패 직후 `[stat]` 줄의 `CAN …` 부분을 본다.

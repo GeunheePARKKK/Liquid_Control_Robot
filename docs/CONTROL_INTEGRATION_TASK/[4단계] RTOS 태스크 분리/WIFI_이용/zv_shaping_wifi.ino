@@ -178,6 +178,12 @@
 #define WIFI_PASS   "liquid1234"     // 8자 이상
 #define TCP_PORT    23
 #define OTA_HOST    "liquid-robot"
+/* 와이파이 송신 전력. 기본 19.5 dBm 은 3.3V 에서 최대 500mA 를 순간 당겨 같은 3.3V 를
+ * 쓰는 CAN 트랜시버를 흔들 수 있다. 8.5 dBm 이면 실내 몇 m 는 충분하고 전류가 크게 준다.
+ * 진단: wifi0 으로 와이파이를 아예 끄고 CAN 이 살아나는지 본다.
+ */
+#define WIFI_TX_POWER  WIFI_POWER_8_5dBm
+volatile bool wifiOn = true;
 
 WiFiServer tcpServer(TCP_PORT);
 WiFiClient tcpClient;
@@ -1243,6 +1249,14 @@ void handleLine(const char *raw) {
    * kp 접두에 걸려 substring(2)="r6" -> toFloat()=0 으로 조용히 먹힌다.
    */
   /* ff / fj / fjr 은 f(CMD_LPF) 보다 먼저 검사해야 한다. */
+  } else if (u == "wifi0" || u == "wifi1") {
+    /* 진단용. wifi0 이면 AP 를 내려 송신을 완전히 멈춘다 (TCP 접속도 끊긴다 — USB 로).
+     * 그 상태에서 CAN 이 안 죽으면 와이파이 전류가 원인이다.
+     */
+    wifiOn = (u == "wifi1");
+    if (wifiOn) { WiFi.mode(WIFI_AP); WiFi.softAP(WIFI_SSID, WIFI_PASS); WiFi.setTxPower(WIFI_TX_POWER); tcpServer.begin(); }
+    else        { tcpClient.stop(); tcpServer.stop(); WiFi.softAPdisconnect(true); WiFi.mode(WIFI_OFF); }
+    Out.printf(">>> 와이파이 %s\n", wifiOn ? "켜짐 (AP 재시작)" : "꺼짐 — 송신 없음. USB 로만 보임");
   } else if (u.startsWith("fjr")) {
     float v = s.substring(3).toFloat();
     if (v >= 0.0f && v <= 0.1f) { FF_J_ROLL = v; Out.printf(">>> FF_J_ROLL = %.4f kg·m²\n", FF_J_ROLL); }
@@ -1507,12 +1521,13 @@ void setup() {
   // ── 와이파이 AP + TCP + OTA ──
   WiFi.mode(WIFI_AP);
   WiFi.softAP(WIFI_SSID, WIFI_PASS);
+  WiFi.setTxPower(WIFI_TX_POWER);          // 송신 전류 버스트를 줄인다 (CAN 트랜시버 전원 보호)
   tcpServer.begin();
   tcpServer.setNoDelay(true);
   ArduinoOTA.setHostname(OTA_HOST);
   ArduinoOTA.onStart([]() { ctrlSend(2); });     // 업로드 전 모터 끄기
   ArduinoOTA.begin();
-  Out.printf("=== 와이파이 AP  SSID %s  비밀번호 %s  IP %s  TCP %d  OTA %s ===\n",
+  Out.printf("=== 와이파이 AP  SSID %s  비밀번호 %s  IP %s  TCP %d  OTA %s  송신 8.5dBm  (wifi0 으로 끔) ===\n",
              WIFI_SSID, WIFI_PASS, WiFi.softAPIP().toString().c_str(), TCP_PORT, OTA_HOST);
 
   zvRecalc();
@@ -1874,10 +1889,10 @@ void ioTask(void *arg) {
   Snap sn;
 
   for (;;) {
-    ArduinoOTA.handle();
+    if (wifiOn) ArduinoOTA.handle();
 
     // TCP 접속 수락. 한 명만 받는다. 이미 붙어 있으면 새 접속은 끊는다.
-    if (tcpServer.hasClient()) {
+    if (wifiOn && tcpServer.hasClient()) {
       if (tcpClient && tcpClient.connected()) {
         tcpServer.available().stop();
       } else {

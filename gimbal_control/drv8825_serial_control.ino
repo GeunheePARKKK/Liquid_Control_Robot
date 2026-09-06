@@ -15,8 +15,8 @@
  * 기본 속도는 6 RPM (1회전에 10초). 손으로 만져도 위험하지 않은 수준으로 낮춰 둠.
  *
  * ---- 배선 ----------------------------------------------------------------
- *   DRV8825 STEP   -> ESP32-S3 GPIO 5
- *   DRV8825 DIR    -> ESP32-S3 GPIO 4
+ *   DRV8825 STEP   -> ESP32-S3 GPIO 15   (4·5 는 CAN 이 쓴다)
+ *   DRV8825 DIR    -> ESP32-S3 GPIO 16
  *   DRV8825 RESET  -> ESP32-S3 3V3      (필수)
  *   DRV8825 SLEEP  -> ESP32-S3 3V3      (필수)
  *   DRV8825 GND    -> ESP32-S3 GND      (전원 (-)와 공통 필수)
@@ -24,8 +24,8 @@
  *   A1/A2, B1/B2   -> 모터 코일 1 / 코일 2
  */
 
-#define STEP_PIN 5
-#define DIR_PIN  4
+#define STEP_PIN 15
+#define DIR_PIN  16
 
 // ENABLE 핀을 GPIO에 연결했다면 1로 바꾼다.
 // 정지 중 코일 전류가 차단되어 발열이 줄고, 축이 자유롭게 돌아간다.

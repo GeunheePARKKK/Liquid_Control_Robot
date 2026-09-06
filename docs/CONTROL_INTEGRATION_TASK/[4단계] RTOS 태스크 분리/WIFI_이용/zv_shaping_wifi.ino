@@ -183,6 +183,7 @@ WiFiServer tcpServer(TCP_PORT);
 WiFiClient tcpClient;
 volatile uint32_t dgTcpDrop = 0;    // TCP 버퍼가 차서 버린 바이트
 bool canOk = false;                 // twai 설치·시작 성공 여부 (setup 에서 확정)
+bool canWasDown = false;            // 버스오프를 겪었으면 복구 뒤 disable 을 다시 보낸다
 
 /* USB 와 TCP 에 같이 쓰는 출력. print/printf/println 이 전부 여기로 온다.
  * ioTask(core 0) 에서만 불린다.
@@ -1833,10 +1834,23 @@ void ctrlTask(void *arg) {
        */
       if (canOk && ts.state == TWAI_STATE_BUS_OFF) {
         twai_initiate_recovery();
+        canWasDown = true;
         qprintln("!! CAN BUS_OFF — 복구 시작");
       } else if (canOk && ts.state == TWAI_STATE_STOPPED) {
         twai_start();
+        canWasDown = true;
         qprintln("!! CAN STOPPED — 재시작");
+      } else if (canOk && ts.state == TWAI_STATE_RUNNING && canWasDown) {
+        /* 버스오프 동안 보낸 disable 은 버스에 나가지 못했다. 모터는 마지막 Kp 로
+         * 계속 붙잡고 있다. 버스가 살아나면 먼저 끈다 — 지금 armed 가 아니라면.
+         */
+        canWasDown = false;
+        if (!armed) {
+          broadcastUniversal(0xFD);
+          qprintln(">>> CAN 복구됨 — 모터 disable 재전송");
+        } else {
+          qprintln(">>> CAN 복구됨");
+        }
       }
 #if RTOS_DIAG
       qprintf("[rtos] 최대틱 %luus  10ms초과 %lu  재동기 %lu | "

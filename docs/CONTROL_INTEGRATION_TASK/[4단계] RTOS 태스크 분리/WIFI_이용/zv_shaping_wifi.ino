@@ -590,6 +590,8 @@ struct Snap {
   float pre_p, pre_r, pitch, ref_p, zv_p, cmd_p, act_p;
   float roll, ref_r, zv_r, cmd_r, act_r;
   int   lvl;                       // 수위 센서 (글리치 제거본)
+  uint8_t  canst;                  // CAN 상태 0=STOPPED 1=RUNNING 2=BUS_OFF 3=RECOVERING
+  uint16_t txerr;                  // TWAI TX 오류 카운터
 };
 
 /* 큐를 둘로 나눈다.
@@ -1789,6 +1791,8 @@ void ctrlTask(void *arg) {
       sn.zv_r  = shaped_roll;     sn.cmd_r = cmd_roll;
       sn.act_r = act_deg[CAN_ID_ROLL  & 0x03] * DIR_ROLL;
       sn.lvl   = lvl_med;
+      { twai_status_info_t ti = {}; sn.canst = 9; sn.txerr = 0;
+        if (canOk && twai_get_status_info(&ti) == ESP_OK) { sn.canst = (uint8_t)ti.state; sn.txerr = (uint16_t)ti.tx_error_counter; } }
       if (xQueueSend(qSnap, &sn, 0) != pdTRUE) dgSnapDrop = dgSnapDrop + 1;
     }
 
@@ -1894,10 +1898,10 @@ void ioTask(void *arg) {
       Out.printf("t:%lu,raw_pitch:%.2f,raw_roll:%.2f,"
                     "pre_pitch:%.2f,pre_roll:%.2f,"
                     "pitch:%.2f,ref_pitch:%.2f,zv_pitch:%.2f,cmd_pitch:%.2f,act_pitch:%.2f,"
-                    "roll:%.2f,ref_roll:%.2f,zv_roll:%.2f,cmd_roll:%.2f,act_roll:%.2f,lvl:%d\n",
+                    "roll:%.2f,ref_roll:%.2f,zv_roll:%.2f,cmd_roll:%.2f,act_roll:%.2f,lvl:%d,cs:%u,ce:%u\n",
                     sn.t, sn.raw_p, sn.raw_r, sn.pre_p, sn.pre_r,
                     sn.pitch, sn.ref_p, sn.zv_p, sn.cmd_p, sn.act_p,
-                    sn.roll,  sn.ref_r, sn.zv_r, sn.cmd_r, sn.act_r, sn.lvl);
+                    sn.roll,  sn.ref_r, sn.zv_r, sn.cmd_r, sn.act_r, sn.lvl, sn.canst, sn.txerr);
     }
 
     /* 문자 단위로 모은다. readStringUntil 은 개행이 올 때까지 기본 1초를

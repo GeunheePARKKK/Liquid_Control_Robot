@@ -1366,7 +1366,7 @@ Arduino IDE 는 폴더 이름 = 스케치 이름을 요구한다. `zv_shaping_wi
 
 ## 와이파이판 CAN 설치 순서
 
-`HASH` · 2026-09-07 02:59 푸시 · `WIFI_이용/zv_shaping_wifi.ino` 만
+`3c3e446` · 2026-09-07 02:59 푸시 · `WIFI_이용/zv_shaping_wifi.ino` 만
 
 ### 증상
 

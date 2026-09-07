@@ -1,7 +1,8 @@
 /*
  * drv8825_serial_control.ino
  *
- * ESP32-S3 + DRV8825 스텝모터 시리얼 명령 제어 (저속 안전 설정)
+ * ESP32-S3 + DRV8825 ×2 스텝모터 시리얼 명령 제어 (저속 안전 설정)
+ * 두 모터를 같은 방향·같은 속도로 동시에 돌린다.
  *
  *   1 -> 시계 방향 연속 회전
  *   2 -> 반시계 방향 연속 회전
@@ -15,8 +16,9 @@
  * 기본 속도는 6 RPM (1회전에 10초). 손으로 만져도 위험하지 않은 수준으로 낮춰 둠.
  *
  * ---- 배선 ----------------------------------------------------------------
- *   DRV8825 STEP   -> ESP32-S3 GPIO 15   (4·5 는 CAN 이 쓴다)
- *   DRV8825 DIR    -> ESP32-S3 GPIO 16
+ *   #1 STEP -> GPIO 15    #1 DIR -> GPIO 16      (4·5 는 CAN 이 쓴다)
+ *   #2 STEP -> GPIO 14    #2 DIR -> GPIO 21
+ *   두 드라이버 모두:
  *   DRV8825 RESET  -> ESP32-S3 3V3      (필수)
  *   DRV8825 SLEEP  -> ESP32-S3 3V3      (필수)
  *   DRV8825 GND    -> ESP32-S3 GND      (전원 (-)와 공통 필수)
@@ -24,8 +26,13 @@
  *   A1/A2, B1/B2   -> 모터 코일 1 / 코일 2
  */
 
-#define STEP_PIN 15
-#define DIR_PIN  16
+#define STEP1_PIN 15
+#define DIR1_PIN  16
+#define STEP2_PIN 14
+#define DIR2_PIN  21
+
+// 두 모터가 서로 반대로 돌면 1로. (#2 만 방향을 뒤집는다)
+#define DIR2_INVERT 0
 
 // ENABLE 핀을 GPIO에 연결했다면 1로 바꾼다.
 // 정지 중 코일 전류가 차단되어 발열이 줄고, 축이 자유롭게 돌아간다.
@@ -75,10 +82,10 @@ void setup() {
   Serial.begin(115200);
   delay(1500);
 
-  pinMode(STEP_PIN, OUTPUT);
-  pinMode(DIR_PIN, OUTPUT);
-  digitalWrite(STEP_PIN, LOW);
-  digitalWrite(DIR_PIN, LOW);
+  pinMode(STEP1_PIN, OUTPUT);  pinMode(DIR1_PIN, OUTPUT);
+  pinMode(STEP2_PIN, OUTPUT);  pinMode(DIR2_PIN, OUTPUT);
+  digitalWrite(STEP1_PIN, LOW);  digitalWrite(DIR1_PIN, LOW);
+  digitalWrite(STEP2_PIN, LOW);  digitalWrite(DIR2_PIN, LOW);
 
 #if USE_ENABLE
   pinMode(EN_PIN, OUTPUT);
@@ -86,7 +93,7 @@ void setup() {
   setMotorEnabled(false);         // 시작은 정지 상태
 
   Serial.println();
-  Serial.println("=== DRV8825 serial control ===");
+  Serial.println("=== DRV8825 x2 serial control (모터 2개 동시) ===");
   Serial.println("  1 : 시계 방향   2 : 반시계 방향   0 : 정지");
   Serial.println("  - : 느리게      + : 빠르게        ? : 상태");
   printSpeed();
@@ -100,7 +107,8 @@ void handleSerial() {
     if (c == '0') {
       if (mode != 0) {
         mode = 0;
-        digitalWrite(STEP_PIN, LOW);
+        digitalWrite(STEP1_PIN, LOW);
+        digitalWrite(STEP2_PIN, LOW);
         setMotorEnabled(false);
         Serial.println("STOP");
       }
@@ -111,12 +119,15 @@ void handleSerial() {
 
       // 회전 중 반대 방향 명령이면 잠깐 멈췄다가 전환 (탈조 방지)
       if (mode != 0) {
-        digitalWrite(STEP_PIN, LOW);
+        digitalWrite(STEP1_PIN, LOW);
+        digitalWrite(STEP2_PIN, LOW);
         delay(REVERSE_PAUSE_MS);
       }
 
       mode = newMode;
-      digitalWrite(DIR_PIN, (mode == 1) ? HIGH : LOW);
+      bool cw = (mode == 1);
+      digitalWrite(DIR1_PIN, cw ? HIGH : LOW);
+      digitalWrite(DIR2_PIN, (cw != (bool)DIR2_INVERT) ? HIGH : LOW);
       delayMicroseconds(10);      // DIR 셋업 시간
       setMotorEnabled(true);
       lastStepUs = micros();
@@ -158,9 +169,12 @@ void loop() {
 
   if (elapsed >= stepIntervalUs) {
     lastStepUs = now;
-    digitalWrite(STEP_PIN, HIGH);
+    // 두 STEP 을 같은 순간에 올리고 내린다 → 두 모터가 같은 스텝을 동시에 밟는다
+    digitalWrite(STEP1_PIN, HIGH);
+    digitalWrite(STEP2_PIN, HIGH);
     delayMicroseconds(PULSE_WIDTH_US);
-    digitalWrite(STEP_PIN, LOW);
+    digitalWrite(STEP1_PIN, LOW);
+    digitalWrite(STEP2_PIN, LOW);
   }
   else if (stepIntervalUs - elapsed > 2000) {
     // 다음 스텝까지 2ms 넘게 남았으면 1ms 양보한다.

@@ -1397,7 +1397,7 @@ Arduino IDE 는 폴더 이름 = 스케치 이름을 요구한다. `zv_shaping_wi
 
 ## 루트 통합본 `Liquid_Control_Robot.ino`
 
-`(커밋)` · 2026-09-08 (푸시 시각) · 저장소 최상위 `Liquid_Control_Robot.ino` 새 파일. 이 파일은 그대로.
+`5f9d4a6` · 2026-09-08 01:16 푸시 · 저장소 최상위 `Liquid_Control_Robot.ino` 새 파일. 이 파일은 그대로.
 
 이 파일(`zv_shaping_rtos.ino`) 전체에 `step_control/drv8825_serial_control.ino` 의
 가변 서스펜션 스텝모터 제어를 붙여 저장소 최상위에 한 개의 `.ino` 로 두었다.

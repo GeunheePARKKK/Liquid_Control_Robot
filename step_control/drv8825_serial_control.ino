@@ -35,7 +35,7 @@
 #define DIR2_PIN  21
 
 // 두 모터가 서로 반대로 돌면 1로. (#2 만 방향을 뒤집는다)
-#define DIR2_INVERT 0
+#define DIR2_INVERT 1
 
 // ENABLE 핀을 GPIO에 연결했다면 1로 바꾼다.
 // 정지 중 코일 전류가 차단되어 발열이 줄고, 축이 자유롭게 돌아간다.

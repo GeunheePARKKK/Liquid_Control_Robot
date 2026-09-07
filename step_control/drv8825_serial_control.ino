@@ -10,6 +10,9 @@
  *   - -> 더 느리게
  *   + -> 더 빠르게
  *   ? -> 현재 상태 출력
+ *   a -> #1 (15/16) 만 구동      b -> #2 (14/21) 만 구동      c -> 둘 다 (기본)
+ *   p -> 프로브: STEP/DIR 4핀을 모두 HIGH 로 고정 (멀티미터로 3.3V 확인용, 0 으로 해제)
+ *   회전 중에는 0.5초마다 [stat] 줄을 출력한다 (capture 로 읽기 위함)
  *
  * 시리얼 모니터 115200 bps
  *
@@ -61,6 +64,20 @@ const unsigned int REVERSE_PAUSE_MS = 100;
 int mode = 0;                     // 0 = 정지, 1 = 시계, 2 = 반시계
 unsigned long lastStepUs = 0;
 
+// 진단용
+int  chan = 3;                    // 비트0 = #1 구동, 비트1 = #2 구동 (3 = 둘 다)
+bool probe = false;               // p : 4핀 HIGH 고정
+unsigned long nStep1 = 0, nStep2 = 0;   // 실제로 내보낸 STEP 펄스 수
+unsigned long lastStatMs = 0;
+
+// ESP32 는 OUTPUT 핀도 digitalRead 로 현재 출력값을 읽을 수 있다.
+void printStat() {
+  Serial.printf("[stat] t:%lu,mode:%d,ch:%d,itv:%lu,n1:%lu,n2:%lu,s1:%d,d1:%d,s2:%d,d2:%d,probe:%d\n",
+                millis(), mode, chan, stepIntervalUs, nStep1, nStep2,
+                digitalRead(STEP1_PIN), digitalRead(DIR1_PIN),
+                digitalRead(STEP2_PIN), digitalRead(DIR2_PIN), probe ? 1 : 0);
+}
+
 float currentRpm() {
   return 60000000.0f / ((float)stepIntervalUs * STEPS_PER_REV);
 }
@@ -96,6 +113,9 @@ void setup() {
   Serial.println("=== DRV8825 x2 serial control (모터 2개 동시) ===");
   Serial.println("  1 : 시계 방향   2 : 반시계 방향   0 : 정지");
   Serial.println("  - : 느리게      + : 빠르게        ? : 상태");
+  Serial.println("  a : #1만        b : #2만          c : 둘 다      p : 4핀 HIGH 프로브");
+  Serial.printf ("  핀: #1 STEP=%d DIR=%d   #2 STEP=%d DIR=%d   DIR2_INVERT=%d\n",
+                 STEP1_PIN, DIR1_PIN, STEP2_PIN, DIR2_PIN, DIR2_INVERT);
   printSpeed();
   Serial.println("현재 상태: STOP");
 }
@@ -105,6 +125,12 @@ void handleSerial() {
     char c = Serial.read();
 
     if (c == '0') {
+      if (probe) {
+        probe = false;
+        digitalWrite(STEP1_PIN, LOW); digitalWrite(DIR1_PIN, LOW);
+        digitalWrite(STEP2_PIN, LOW); digitalWrite(DIR2_PIN, LOW);
+        Serial.println("PROBE OFF (4핀 LOW)");
+      }
       if (mode != 0) {
         mode = 0;
         digitalWrite(STEP1_PIN, LOW);
@@ -112,6 +138,20 @@ void handleSerial() {
         setMotorEnabled(false);
         Serial.println("STOP");
       }
+      printStat();
+    }
+    else if (c == 'a' || c == 'b' || c == 'c') {
+      chan = (c == 'a') ? 1 : (c == 'b') ? 2 : 3;
+      Serial.printf("구동 채널: %s\n", chan == 1 ? "#1 (15/16) 만" : chan == 2 ? "#2 (14/21) 만" : "둘 다");
+      printStat();
+    }
+    else if (c == 'p') {
+      mode = 0;
+      probe = true;
+      digitalWrite(STEP1_PIN, HIGH); digitalWrite(DIR1_PIN, HIGH);
+      digitalWrite(STEP2_PIN, HIGH); digitalWrite(DIR2_PIN, HIGH);
+      Serial.println("PROBE ON: GPIO 15,16,14,21 모두 HIGH(3.3V) 고정. 멀티미터로 재고 0 으로 해제");
+      printStat();
     }
     else if (c == '1' || c == '2') {
       int newMode = (c == '1') ? 1 : 2;
@@ -132,8 +172,11 @@ void handleSerial() {
       setMotorEnabled(true);
       lastStepUs = micros();
 
+      nStep1 = nStep2 = 0;
+      lastStatMs = millis();
       Serial.println((mode == 1) ? "CW  (시계 방향)" : "CCW (반시계 방향)");
       printSpeed();
+      printStat();
     }
     else if (c == '-') {
       stepIntervalUs = stepIntervalUs * 2;
@@ -149,6 +192,7 @@ void handleSerial() {
       Serial.printf("상태: %s\n",
                     mode == 0 ? "STOP" : (mode == 1 ? "CW" : "CCW"));
       printSpeed();
+      printStat();
     }
     // 그 외 문자(개행 등)는 무시
   }
@@ -170,11 +214,15 @@ void loop() {
   if (elapsed >= stepIntervalUs) {
     lastStepUs = now;
     // 두 STEP 을 같은 순간에 올리고 내린다 → 두 모터가 같은 스텝을 동시에 밟는다
-    digitalWrite(STEP1_PIN, HIGH);
-    digitalWrite(STEP2_PIN, HIGH);
+    if (chan & 1) digitalWrite(STEP1_PIN, HIGH);
+    if (chan & 2) digitalWrite(STEP2_PIN, HIGH);
     delayMicroseconds(PULSE_WIDTH_US);
-    digitalWrite(STEP1_PIN, LOW);
-    digitalWrite(STEP2_PIN, LOW);
+    if (chan & 1) { digitalWrite(STEP1_PIN, LOW); nStep1++; }
+    if (chan & 2) { digitalWrite(STEP2_PIN, LOW); nStep2++; }
+  }
+  if (millis() - lastStatMs >= 500) {
+    lastStatMs = millis();
+    printStat();
   }
   else if (stepIntervalUs - elapsed > 2000) {
     // 다음 스텝까지 2ms 넘게 남았으면 1ms 양보한다.

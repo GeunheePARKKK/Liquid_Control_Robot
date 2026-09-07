@@ -4,8 +4,12 @@
  * ESP32-S3 + DRV8825 ×2 스텝모터 시리얼 명령 제어 (저속 안전 설정)
  * 두 모터를 같은 방향·같은 속도로 동시에 돌린다.
  *
- *   1 -> 시계 방향 연속 회전
- *   2 -> 반시계 방향 연속 회전
+ * 용도: 주행부 가변 서스펜션 강성 조절.
+ *   스텝모터 2개가 판스프링 고정부의 조절 나사를 돌려 서스펜션을
+ *   딴딴하게(강성 ↑) 또는 헐렁하게(강성 ↓) 만든다.
+ *
+ *   1 -> 시계 방향 연속 회전   = 서스펜션 딴딴해지는 방향 (강성 ↑)
+ *   2 -> 반시계 방향 연속 회전 = 서스펜션 헐렁해지는 방향 (강성 ↓)
  *   0 -> 즉시 정지
  *   - -> 더 느리게
  *   + -> 더 빠르게
@@ -111,7 +115,10 @@ void setup() {
 
   Serial.println();
   Serial.println("=== DRV8825 x2 serial control (모터 2개 동시) ===");
-  Serial.println("  1 : 시계 방향   2 : 반시계 방향   0 : 정지");
+  Serial.println("용도: 주행부 가변 서스펜션 강성 조절");
+  Serial.println("  1 : 딴딴하게 (강성 UP,   시계 방향)");
+  Serial.println("  2 : 헐렁하게 (강성 DOWN, 반시계 방향)");
+  Serial.println("  0 : 정지");
   Serial.println("  - : 느리게      + : 빠르게        ? : 상태");
   Serial.println("  a : #1만        b : #2만          c : 둘 다      p : 4핀 HIGH 프로브");
   Serial.printf ("  핀: #1 STEP=%d DIR=%d   #2 STEP=%d DIR=%d   DIR2_INVERT=%d\n",
@@ -174,7 +181,8 @@ void handleSerial() {
 
       nStep1 = nStep2 = 0;
       lastStatMs = millis();
-      Serial.println((mode == 1) ? "CW  (시계 방향)" : "CCW (반시계 방향)");
+      Serial.println((mode == 1) ? "서스펜션 딴딴하게 (강성 UP)   CW  시계 방향"
+                                 : "서스펜션 헐렁하게 (강성 DOWN) CCW 반시계 방향");
       printSpeed();
       printStat();
     }
@@ -190,7 +198,7 @@ void handleSerial() {
     }
     else if (c == '?') {
       Serial.printf("상태: %s\n",
-                    mode == 0 ? "STOP" : (mode == 1 ? "CW" : "CCW"));
+                    mode == 0 ? "STOP" : (mode == 1 ? "딴딴하게 (강성 UP, CW)" : "헐렁하게 (강성 DOWN, CCW)"));
       printSpeed();
       printStat();
     }

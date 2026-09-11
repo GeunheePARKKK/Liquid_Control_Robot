@@ -14,7 +14,7 @@
  *       │ 모터   │ CAN ID │ Master ID │
  *       ├────────┼────────┼───────────┤
  *       │  1축   │  0x01  │   0x00    │
- *       │  2축   │  0x02  │   0x01    │
+ *       │  2축   │  0x02  │   0x11    │
  *       └────────┴────────┴───────────┘
  *
  * 프로토콜
@@ -39,7 +39,7 @@
 
 // CubeMars 툴에서 설정한 값 — {CAN_ID, MASTER_ID}
 const uint8_t CAN_ID[N_MOTOR]    = { 0x01, 0x02 };
-const uint8_t MASTER_ID[N_MOTOR] = { 0x00, 0x01 };
+const uint8_t MASTER_ID[N_MOTOR] = { 0x00, 0x11 };
 
 #define POS_RAD    0.5f    // ±0.5 rad 왕복 (범위 ±12.5 rad)
 #define VEL_LIMIT  1.0f    // 속도 제한 1 rad/s

@@ -1,5 +1,9 @@
 # Liquid Control Robot
 
+![architecture](docs/architecture/architecture.png)
+
+https://geunheeparkkk.github.io/Liquid_Control_Robot/architecture/architecture.html
+
 액체 화물 이송 로봇 제어 시스템 프로젝트입니다.
 
 2026 하계 논문경진대회, 한이음 드림업 공모전 

@@ -1,0 +1,401 @@
+{
+ "schema_version": 1,
+ "diagram_type": "architecture",
+ "meta": {
+  "title": "Liquid Control Robot — 시스템 아키텍처",
+  "quality_profile": "showcase",
+  "repository": {
+   "url": "https://github.com/GeunheePARKKK/Liquid_Control_Robot",
+   "provider": "github",
+   "revision": "7e22c4697a4fe58145e1acbc1fe2cc1ac130dd18"
+  },
+  "views": [
+   {
+    "id": "control-path",
+    "label": "트레이 제어 경로",
+    "focus": [
+     "imu",
+     "ctrl",
+     "gimbal"
+    ],
+    "note": "IMU 100 Hz → 합력 벡터 목표각 → ZV 입력성형 → CAN MIT 지령. 이 경로의 지연 실측 205 ms (ZV 포함)."
+   },
+   {
+    "id": "liquid-sense",
+    "label": "액체 위상 계측",
+    "focus": [
+     "lvl",
+     "ctrl",
+     "pc"
+    ],
+    "note": "수위 센서 접촉 간격으로 슬로싱 2.78~3.0 Hz 실측. 제어에는 아직 안 쓰고 로그로만."
+   },
+   {
+    "id": "drive-side",
+    "label": "주행부와 서스펜션",
+    "focus": [
+     "drive",
+     "dcmotor",
+     "sus",
+     "stepper",
+     "ctrl"
+    ],
+    "note": "주행 보드는 별도 ESP32-S3. 서스펜션 스텝모터는 제어 보드의 susTask 가 구동."
+   }
+  ],
+  "viewBox": [
+   1100,
+   500
+  ]
+ },
+ "components": [
+  {
+   "id": "imu",
+   "type": "external",
+   "label": "LSM6DSOX IMU",
+   "sublabel": "차체 고정 · I2C 0x6A · 100 Hz",
+   "tag": "LPF2 ODR/20",
+   "pos": [
+    20,
+    50
+   ],
+   "size": [
+    170,
+    64
+   ],
+   "sources": [
+    {
+     "path": "Liquid_Control_Robot.ino",
+     "label": "readIMU / configSensor"
+    }
+   ]
+  },
+  {
+   "id": "lvl",
+   "type": "external",
+   "label": "저항식 수위 센서",
+   "sublabel": "용기 벽 · ADC GPIO1 · 300 µs 급전",
+   "pos": [
+    20,
+    210
+   ],
+   "size": [
+    170,
+    64
+   ],
+   "sources": [
+    {
+     "path": "Liquid_Control_Robot.ino",
+     "label": "readLevel"
+    }
+   ]
+  },
+  {
+   "id": "ctrl",
+   "type": "backend",
+   "label": "ctrlTask",
+   "sublabel": "코어1 · 100 Hz · 합력벡터 → ZV → FF",
+   "tag": "우선순위 6",
+   "pos": [
+    300,
+    50
+   ],
+   "size": [
+    200,
+    72
+   ],
+   "sources": [
+    {
+     "path": "Liquid_Control_Robot.ino",
+     "label": "ctrlTask"
+    }
+   ]
+  },
+  {
+   "id": "io",
+   "type": "backend",
+   "label": "ioTask",
+   "sublabel": "코어0 · 명령 파서 · 로그 33 Hz",
+   "tag": "우선순위 2",
+   "pos": [
+    300,
+    210
+   ],
+   "size": [
+    200,
+    64
+   ],
+   "sources": [
+    {
+     "path": "Liquid_Control_Robot.ino",
+     "label": "ioTask / handleLine"
+    }
+   ]
+  },
+  {
+   "id": "sus",
+   "type": "backend",
+   "label": "susTask",
+   "sublabel": "코어0 · STEP 15/14 · DIR 16/21",
+   "tag": "우선순위 3",
+   "pos": [
+    300,
+    380
+   ],
+   "size": [
+    200,
+    64
+   ],
+   "sources": [
+    {
+     "path": "Liquid_Control_Robot.ino",
+     "label": "susTask"
+    },
+    {
+     "path": "step_control/drv8825_serial_control.ino",
+     "label": "원본"
+    }
+   ]
+  },
+  {
+   "id": "gimbal",
+   "type": "external",
+   "label": "GL60II 짐벌모터 ×2",
+   "sublabel": "MIT 모드 · 0x01/0x02 · Master 0x00/0x11",
+   "tag": "Kp 4 · Kd 0.2",
+   "pos": [
+    570,
+    50
+   ],
+   "size": [
+    210,
+    72
+   ],
+   "sources": [
+    {
+     "path": "gimbal_control/motor_test_MIT.ino",
+     "label": "MIT 프레임"
+    }
+   ]
+  },
+  {
+   "id": "stepper",
+   "type": "external",
+   "label": "DRV8825 ×2 + 스텝모터",
+   "sublabel": "가변 서스펜션 강성 · Vref 0.4 V",
+   "tag": "DIR2 반전",
+   "pos": [
+    570,
+    380
+   ],
+   "size": [
+    210,
+    64
+   ],
+   "sources": [
+    {
+     "path": "step_control/README.md",
+     "label": "배선표"
+    }
+   ]
+  },
+  {
+   "id": "drive",
+   "type": "backend",
+   "label": "주행 보드 ESP32-S3",
+   "sublabel": "5 s 주행 · 정지 반복 · 램프 가감속",
+   "pos": [
+    570,
+    210
+   ],
+   "size": [
+    210,
+    64
+   ],
+   "sources": [
+    {
+     "path": "주행부_모터/README.md",
+     "label": "핀맵"
+    }
+   ]
+  },
+  {
+   "id": "dcmotor",
+   "type": "external",
+   "label": "MDD10A ×2 → DC 모터 ×4",
+   "sublabel": "PWM/DIR · 엔코더 ×4 (PCNT)",
+   "pos": [
+    850,
+    210
+   ],
+   "size": [
+    210,
+    64
+   ]
+  },
+  {
+   "id": "pc",
+   "type": "frontend",
+   "label": "PC 분석 도구 (Python)",
+   "sublabel": "capture_run · lagchain · 접촉 통계",
+   "pos": [
+    20,
+    380
+   ],
+   "size": [
+    200,
+    64
+   ]
+  }
+ ],
+ "boundaries": [
+  {
+   "kind": "region",
+   "label": "제어 보드 ESP32-S3 + FreeRTOS",
+   "wraps": [
+    "ctrl",
+    "io",
+    "sus"
+   ]
+  },
+  {
+   "kind": "region",
+   "label": "주행부",
+   "wraps": [
+    "drive",
+    "dcmotor"
+   ]
+  }
+ ],
+ "connections": [
+  {
+   "id": "imu-ctrl",
+   "from": "imu",
+   "to": "ctrl",
+   "label": "I2C 6축",
+   "variant": "emphasis",
+   "labelDy": -22
+  },
+  {
+   "id": "lvl-ctrl",
+   "from": "lvl",
+   "to": "ctrl",
+   "label": "ADC · 3점 중앙값",
+   "fromSide": "right",
+   "toSide": "left",
+   "labelDy": -14
+  },
+  {
+   "id": "ctrl-gimbal",
+   "from": "ctrl",
+   "to": "gimbal",
+   "label": "CAN MIT 지령 · 피드백 200/s",
+   "variant": "emphasis",
+   "labelDy": -22
+  },
+  {
+   "id": "ctrl-io",
+   "from": "ctrl",
+   "to": "io",
+   "label": "qSnap · qEvt",
+   "fromSide": "bottom",
+   "toSide": "top",
+   "labelAt": [
+    335,
+    172
+   ]
+  },
+  {
+   "id": "io-ctrl",
+   "from": "io",
+   "to": "ctrl",
+   "label": "qCmd (arm/stop)",
+   "variant": "dashed",
+   "fromSide": "top",
+   "toSide": "bottom",
+   "labelAt": [
+    470,
+    172
+   ]
+  },
+  {
+   "id": "io-sus",
+   "from": "io",
+   "to": "sus",
+   "label": "1 / 2 / 0 / ± (volatile)",
+   "variant": "dashed",
+   "fromSide": "bottom",
+   "toSide": "top",
+   "labelAt": [
+    400,
+    335
+   ]
+  },
+  {
+   "id": "sus-stepper",
+   "from": "sus",
+   "to": "stepper",
+   "label": "STEP · DIR 동시 펄스",
+   "labelAt": [
+    535,
+    376
+   ]
+  },
+  {
+   "id": "io-pc",
+   "from": "io",
+   "to": "pc",
+   "label": "USB 시리얼 로그 · 명령",
+   "fromSide": "left",
+   "toSide": "right",
+   "labelDy": -22
+  },
+  {
+   "id": "drive-dc",
+   "from": "drive",
+   "to": "dcmotor"
+  },
+  {
+   "id": "drive-ctrl",
+   "from": "drive",
+   "to": "ctrl",
+   "label": "가감속 예고 (UART, 미구현)",
+   "variant": "dashed",
+   "fromSide": "left",
+   "toSide": "right",
+   "labelDy": -14
+  }
+ ],
+ "cards": [
+  {
+   "dot": "cyan",
+   "title": "제어 법칙",
+   "items": [
+    "합력 벡터: θ_ref = atan(a_lin/g), 수평 유지와 가속 대응이 한 식",
+    "ZV 2 임펄스 입력성형, zf 실측 2.9 Hz (Ø8.9 cm, 400 mL)",
+    "피드포워드 v_des + J·θ̈ (J = 0.0038), 모터 지연 70 → 25 ms",
+    "지연 사슬 305 → 205 ms (LPF2 + FF, ZV 포함)"
+   ]
+  },
+  {
+   "dot": "amber",
+   "title": "실측으로 밝힌 것",
+   "items": [
+    "WiFi 켜면 CAN BUS_OFF → 와이파이판 보류, 유선으로 진행",
+    "DRV8825 Vref 1.6 V(3.2 A)가 과열·연기 원인, 0.4 V로 해결",
+    "출발 충격 180 ms < 슬로싱 반주기 → 트레이가 한 박자 늦음",
+    "센 사이클은 차체가 2.3~3.2 Hz로 흔들림, 서스펜션 강성 조절이 다음 실험"
+   ]
+  },
+  {
+   "dot": "violet",
+   "title": "저장소",
+   "items": [
+    "루트 Liquid_Control_Robot.ino = zv_shaping_rtos + susTask",
+    "docs/CONTROL_INTEGRATION_TASK: 1~4단계 + 변경이력",
+    "gimbal_control / step_control / 주행부_모터 / servo_control",
+    "보고서 그림·요구사항 정의서는 바탕화면 (SVG 먼저, PNG)"
+   ]
+  }
+ ]
+}

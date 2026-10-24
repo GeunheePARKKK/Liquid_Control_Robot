@@ -1,7 +1,7 @@
 # 주행 링크 — ESP32-S3 (와이파이 시리얼 모니터) → 우노 (앞바퀴 2개)
 
 ```
-노트북 PowerShell ──WiFi TCP 23──► ESP32-S3 (esp32_drive_wifi) ──UART 38400──► 우노 (uno_drive_link) ──► MDD10A ×2 ──► 앞바퀴 2개
+노트북 PowerShell ──WiFi TCP 23──► ESP32-S3 (esp32_drive_wifi) ──UART 9600──► 우노 (uno_drive_link) ──► MDD10A ×2 ──► 앞바퀴 2개
  python drive_monitor.py                                        ◄── E 엔코더/출력 상태 ──┘
 ```
 
@@ -11,41 +11,47 @@ zv_shaping_wifi.ino 와 같은 방식. 웹 페이지 없음. WiFi `Drive_Robot` 
 
 | ESP32-S3 | | 우노 | 비고 |
 |---|---|---|---|
-| **GPIO17** (TX) | → | **A4** | 직결 (3.3 V 출력, 우노가 HIGH 로 읽음) |
-| **GPIO18** (RX) | ← | **A5** | 우노 5 V 출력 → **1 kΩ + 2 kΩ 분압** 필수 |
-| **GND** | — | **GND** | 공통 필수 |
+| **GPIO17** (TX) | → | **S10** (D10) | 직결 (3.3 V 출력, 우노가 HIGH 로 읽음) |
+| **GPIO18** (RX) | ← | **S11** (D11) | 선택. 우노 5 V 출력 → **1 kΩ + 2 kΩ 분압** 필수 |
+| **GND** | — | **G** | 공통 필수 |
 
 ```
-우노 A5 ──[1kΩ]──┬──► ESP32-S3 GPIO18
+우노 S11 ──[1kΩ]──┬──► ESP32-S3 GPIO18
                  [2kΩ]
                   GND
 ```
 
-- A5 선은 엔코더·실제 출력을 `?` 에서 보여주는 용도. 조작만 할 거면 GPIO17→A4, GND 두 줄로 충분.
+- S11 선은 엔코더·실제 출력을 `?` 에서 보여주는 용도. 조작만 할 거면 GPIO17→S10, GND 두 줄로 충분.
+- A5 는 예전 코드의 시작 스위치 자리. 꽂혀 있어도 되고, 이 코드에선 안 쓴다.
 - 우노 D0/D1(USB)을 안 쓰므로 우노 업로드·시리얼 모니터는 선 안 뽑고 그대로.
 - 전원: 각자 USB, 또는 우노 5V → ESP32-S3 5V 핀 (GND 공통). 모터 전원은 MDD10A 배터리 단자로만.
 
-## 우노 모터 배선 (주행부_모터/README.md 우노 표의 앞바퀴 부분)
+## 우노 모터 배선 (2026-10-24 실물 확인)
 
-| 기능 | 우노 핀 | MDD10A |
-|---|---|---|
-| 왼앞 PWM / DIR | **D5 / A0** | 1번 PWM1 / DIR1 |
-| 오른앞 PWM / DIR | **D9 / A2** | 2번 PWM1 / DIR1 |
-| 왼뒤·오른뒤 PWM (안 씀) | D6, D10 | 코드가 0 으로 고정 |
-| 왼앞 엔코더 A / B | D2 / D4 | 선택 |
-| 오른앞 엔코더 A / B | D3 / D7 | 선택 |
+MDD10A **한 장**의 두 채널로 앞바퀴 2개. 쉴드 S핀 번호 = 우노 D핀 번호.
+`주행부_모터/README.md` 의 "우노 배선과의 대응" 표(D5/A0, D9/A2 …)와 **다르다**. 실물이 기준.
+
+| 바퀴 | MDD10A | 쉴드 | 우노 핀 | 전진 DIR |
+|---|---|---|---|---|
+| 앞왼 (FL) | PWM2 / DIR2 | S6 / S4 | **D6 / D4** | LOW (`L_INVERT 1`) |
+| 앞오른 (FR) | PWM1 / DIR1 | S9 / S8 | **D9 / D8** | HIGH (`R_INVERT 0`) |
+| FL 엔코더 B상 | | S3 | D3 (인터럽트) | |
+| FR 엔코더 B상 | | S7 | D7 (폴링) | |
+
+예전 2WD 코드(FL D6/D4, FR D9/D8, 엔코더 B상만)와 동일. A상(D2, D5)은 불량이라 안 쓴다.
 
 ## 순서
 
-1. **우노** `uno_drive_link.ino` 업로드 (Arduino Uno). USB 시리얼 모니터 115200, 바퀴 든 채 `f` →
-   두 바퀴 다 앞으로 1초. 한쪽이 뒤로 돌면 그쪽 `L_INVERT` / `R_INVERT` = 1 로 바꿔 재업로드.
-2. **ESP32-S3** `esp32_drive_wifi.ino` 업로드 (ESP32S3 Dev Module, **USB CDC On Boot = Enabled**).
+1. **우노** `uno_drive_link.ino` 업로드 (Arduino Uno). USB 시리얼 모니터 115200, **줄 끝 = 새 줄(Enter)**,
+   바퀴 든 채 `f` → 두 바퀴 다 앞으로 1초 (PWM 150). 한쪽이 뒤로 돌면 그쪽 `L_INVERT` / `R_INVERT` 를 뒤집어 재업로드.
+2. **ESP32-S3** `esp32_drive_wifi.ino` 업로드 (ESP32S3 Dev Module). **COM 포트**에 꽂고 **USB CDC On Boot = Disabled** (보드 1 과 동일).
+   네이티브 USB 포트를 쓸 때만 Enabled.
 3. 배선 연결 → 노트북 WiFi 를 `Drive_Robot` 에 연결 ("인터넷 없음" 표시 정상).
 4. PowerShell:
    ```
    python "C:\Users\super\OneDrive\Desktop\주행_링크\drive_monitor.py"
    ```
-5. `?` → `[uno] enc …` 줄이 나오면 양방향 OK (`보고 없음` 이면 A5 선 확인).
+5. `?` → `[uno] enc …` 줄이 나오면 양방향 OK (`보고 없음` 이면 S11 선 확인).
 
 ## 명령 (drive_monitor.py / ESP32 USB 시리얼 공용)
 
@@ -69,12 +75,12 @@ zv_shaping_wifi.ino 와 같은 방식. 웹 페이지 없음. WiFi `Drive_Robot` 
 2. `w` 만 친 경우 hold 시간 지나면 정지 (노트북이 멈춰도 계속 안 달림)
 3. 우노: `M` 이 300 ms 안 오면 스스로 정지 (선 빠짐·ESP32 리셋)
 
-## 링크 프로토콜 (UART 38400, 줄 단위)
+## 링크 프로토콜 (UART 9600, 줄 단위)
 
 | 방향 | 메시지 | 의미 |
 |---|---|---|
 | ESP32 → 우노 | `M <left> <right>` | 목표 PWM −255~+255. 정지 중에도 `M 0 0` 을 50 ms 마다 |
 | ESP32 → 우노 | `X` | 비상 정지 |
 | ESP32 → 우노 | 그 외 줄 | 그대로 전달 (`ramp700`, `e`) |
-| 우노 → ESP32 | `E <encL> <encR> <pwmL> <pwmR>` | 200 ms 마다 |
+| 우노 → ESP32 | `E <encL> <encR> <pwmL> <pwmR>` | 우노 `SEND_STATUS 1` + S11 연결 시만, 200 ms 마다 |
 | 우노 → ESP32 | 그 외 줄 | `[uno] …` 로 표시 |

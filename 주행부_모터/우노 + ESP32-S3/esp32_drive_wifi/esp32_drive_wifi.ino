@@ -18,8 +18,8 @@
  * ─────────────────────────────────────────────────────────────────────────────
  * ESP32-S3 ↔ 우노 배선
  *
- *   ESP32-S3 GPIO17 (TX) ──────────────────── 우노 A4 (RX)
- *   ESP32-S3 GPIO18 (RX) ◄── 2kΩ ──┬── 1kΩ ── 우노 A5 (TX, 5V → 3.3V 분압)
+ *   ESP32-S3 GPIO17 (TX) ──────────────────── 우노 D10 / 쉴드 S10 (RX)
+ *   ESP32-S3 GPIO18 (RX) ◄── 2kΩ ──┬── 1kΩ ── 우노 D11 / 쉴드 S11 (TX, 5V → 3.3V 분압)
  *                                 GND
  *   ESP32-S3 GND ──────────────────────────── 우노 GND   (공통 필수)
  *
@@ -47,16 +47,17 @@
  *   - 우노는 M 이 300ms 안 오면 스스로 정지 (선 빠짐·이 보드 리셋)
  *
  * ─────────────────────────────────────────────────────────────────────────────
- * 우노 링크 프로토콜 (Serial1, 38400, 줄 단위)
+ * 우노 링크 프로토콜 (Serial1, 9600, 줄 단위)
  *
  *   보드 → 우노   M <left> <right>   −255~+255. 50ms 마다 항상 (정지 중엔 M 0 0)
  *                X                  비상 정지
  *                그 외 줄            그대로 전달
- *   우노 → 보드   E <encL> <encR> <pwmL> <pwmR>   200ms 마다 → '?' 에서 표시
+ *   우노 → 보드   E <encL> <encR> <pwmL> <pwmR>   우노 SEND_STATUS 1 + S11 연결 시만. '?' 에서 표시
  *                그 외 줄                          "[uno] …" 로 표시
  *
  * ─────────────────────────────────────────────────────────────────────────────
- * 보드 설정: ESP32S3 Dev Module, Tools → USB CDC On Boot = Enabled
+ * 보드 설정: ESP32S3 Dev Module. COM 포트(CH343)에 꽂으면 Tools → USB CDC On Boot = Disabled (보드 1 과 동일).
+ *            네이티브 USB 포트에 꽂을 때만 Enabled.
  * 라이브러리: WiFi.h (보드 패키지 내장) 뿐
  * -----------------------------------------------------------------------------
  */
@@ -77,9 +78,9 @@ WiFiClient tcpClient;
 // =============================================================================
 //  우노 링크 (Serial1)
 // =============================================================================
-#define UNO_TX_PIN   17              // → 우노 A4
-#define UNO_RX_PIN   18              // ← 우노 A5 (분압 거쳐서)
-#define UNO_BAUD     38400
+#define UNO_TX_PIN   17              // → 우노 D10 (쉴드 S10)
+#define UNO_RX_PIN   18              // ← 우노 D11 (쉴드 S11, 분압 거쳐서)
+#define UNO_BAUD     9600
 #define UNO_SEND_MS  50              // M 전송 주기 (20Hz)
 
 // =============================================================================
@@ -214,7 +215,7 @@ void handleLine(char *line) {
               speedVal, (unsigned long)holdMs, cmdL, cmdR, moving ? moving : '-',
               (tcpClient && tcpClient.connected()) ? tcpClient.remoteIP().toString().c_str() : "미접속");
     if (lastUnoRxMs == 0)
-      outPrintf("[uno]   보고 없음 (A5 선 미연결?)\n");
+      outPrintf("[uno]   보고 없음 (S11 선 미연결?)\n");
     else
       outPrintf("[uno]   enc L:%ld R:%ld  out L:%d R:%d  (%lu ms 전)\n",
                 unoEncL, unoEncR, unoPwmL, unoPwmR, (unsigned long)(millis() - lastUnoRxMs));

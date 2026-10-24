@@ -7,22 +7,27 @@
  * UART 한 줄로 넘겨주면, 이 보드가 실제로 모터를 돌린다.
  * 엔코더가 5V 라서 ESP32-S3 에 직접 못 붙이므로 모터·엔코더는 우노에 그대로 둔다.
  *
- * 핀은 주행부_모터/README.md "우노 배선과의 대응" 표의 앞바퀴 2개 그대로.
- * 뒷바퀴 채널(D6/A1, D10/A3)은 안 쓰지만 선이 아직 꽂혀 있을 수 있어 PWM 0 으로 묶는다.
+ * 배선 (2026-10-24 실물 + 예전 2WD 코드 기준, 쉴드 S핀 번호 = 우노 D핀 번호):
+ *   MDD10A 한 장의 두 채널로 앞바퀴 2개 구동
+ *   앞왼(FL)  PWM / DIR = D6 / D4   (MDD10A PWM2 / DIR2, 쉴드 S6 / S4)  전진 = DIR LOW
+ *   앞오른(FR) PWM / DIR = D9 / D8   (MDD10A PWM1 / DIR1, 쉴드 S9 / S8)  전진 = DIR HIGH
+ *   엔코더  FL B상 D3 (인터럽트), FR B상 D7 (폴링). A상(D2, D5)은 불량이라 안 씀
+ *   예전 코드의 시작 스위치 A5 — 이 코드에선 안 쓰지만 꽂혀 있어도 됨
+ *   ※ 주행부_모터/README.md 의 "우노 배선과의 대응" 표(D5/A0, D9/A2 …)와 다르다. 실물이 기준.
  *
  * ─────────────────────────────────────────────────────────────────────────────
  * ESP32-S3 ↔ 우노 배선
  *
- *   ESP32-S3 GPIO17 (TX) ──────────────────── 우노 A4 (RX, SoftwareSerial)
- *   ESP32-S3 GPIO18 (RX) ◄── 2kΩ ──┬── 1kΩ ── 우노 A5 (TX, 5V → 3.3V 분압)
+ *   ESP32-S3 GPIO17 (TX) ──────────────────── 우노 D10 / 쉴드 S10 (RX, SoftwareSerial)
+ *   ESP32-S3 GPIO18 (RX) ◄── 2kΩ ──┬── 1kΩ ── 우노 D11 / 쉴드 S11 (TX, 5V → 3.3V 분압)
  *                                 GND
  *   ESP32-S3 GND ──────────────────────────── 우노 GND   (공통 필수)
  *
- *   우노 A5 쪽 선은 엔코더 값을 웹에 보여주는 용도라 조작만 할 거면 빼도 된다.
+ *   우노 S11 쪽 선은 엔코더 값을 ESP32 에 보여주는 용도라 조작만 할 거면 빼도 된다.
  *   D0/D1(USB 시리얼)을 안 쓰므로 우노 업로드·시리얼 모니터는 선 안 뽑고 그대로 된다.
  *
  * ─────────────────────────────────────────────────────────────────────────────
- * 링크 프로토콜 (38400, 줄 단위)
+ * 링크 프로토콜 (9600, 줄 단위)
  *
  *   ESP32 → 우노
  *     M <left> <right>   −255~+255. 부호 = 방향. 키가 눌려 있든 아니든 50ms 마다 온다
@@ -30,9 +35,9 @@
  *     ramp<ms>           램프 시간 변경 (0 = 램프 없음)
  *     ramp<ms> e ?       램프 변경 / 엔코더 0 / 상태
  *     (f b l r 테스트는 USB 전용 — ESP32 가 보내는 M 에 바로 덮인다)
- *   우노 → ESP32
+ *   우노 → ESP32 (SEND_STATUS 1 일 때만. SoftwareSerial 은 보내는 동안 못 받으므로 기본 0)
  *     E <encL> <encR> <pwmL> <pwmR>   200ms 마다 상태
- *     그 외 텍스트 줄                   ESP32 가 "[uno] ..." 로 웹 로그에 표시
+ *     그 외 텍스트 줄                   ESP32 가 "[uno] ..." 로 표시
  *
  *   300ms 동안 유효한 M 이 안 오면 즉시 정지 (선 빠짐·ESP32 리셋 대비).
  *
@@ -46,13 +51,13 @@
  * ─────────────────────────────────────────────────────────────────────────────
  * USB 시리얼(115200) 테스트 명령 — 우노만 USB 로 꽂고 바퀴 들고 확인
  *
- *   f / b / l / r   1초 동안 전진/후진/좌회전/우회전 (PWM 100)
+ *   f / b / l / r   1초 동안 전진/후진/좌회전/우회전 (PWM 150). 반드시 Enter(새 줄)로 끝내야 한다
  *   s               정지
  *   ?               상태
  *   e               엔코더 카운트 0 으로
  *   ramp<ms>        램프 시간 (예: ramp0, ramp700)
  *
- *   'f' 를 쳤는데 한쪽 바퀴가 뒤로 돌면 그쪽 *_INVERT 를 1 로 바꾼다.
+ *   'f' 를 쳤는데 한쪽 바퀴가 뒤로 돌면 그쪽 *_INVERT 를 뒤집는다.
  * -----------------------------------------------------------------------------
  */
 
@@ -61,33 +66,34 @@
 // =============================================================================
 //  핀
 // =============================================================================
-#define L_PWM    5     // 왼앞   PWM  (MDD10A 1 · PWM1)
-#define L_DIR    A0    // 왼앞   DIR  (MDD10A 1 · DIR1)
-#define R_PWM    9     // 오른앞 PWM  (MDD10A 2 · PWM1)
-#define R_DIR    A2    // 오른앞 DIR  (MDD10A 2 · DIR1)
-#define RL_PWM   6     // 왼뒤   PWM  — 안 씀, 0 고정
-#define RR_PWM   10    // 오른뒤 PWM  — 안 씀, 0 고정
+// 예전 2WD 코드(FL D6/D4, FR D9/D8)와 동일
+#define L_PWM    6     // 앞왼(FL)  PWM  (MDD10A PWM2, 쉴드 S6)
+#define L_DIR    4     // 앞왼(FL)  DIR  (MDD10A DIR2, 쉴드 S4)
+#define R_PWM    9     // 앞오른(FR) PWM (MDD10A PWM1, 쉴드 S9)
+#define R_DIR    8     // 앞오른(FR) DIR (MDD10A DIR1, 쉴드 S8)
 
-#define L_INVERT 0     // 'f' 테스트에서 왼쪽이 뒤로 돌면 1
-#define R_INVERT 0     // 'f' 테스트에서 오른쪽이 뒤로 돌면 1
+#define L_INVERT 1     // 예전 코드: FL 전진 = DIR LOW
+#define R_INVERT 0     // 예전 코드: FR 전진 = DIR HIGH
 
-#define ENC_L_A  2     // 왼앞  엔코더 A (INT0)
-#define ENC_L_B  4     // 왼앞  엔코더 B
-#define ENC_R_A  3     // 오른앞 엔코더 A (INT1)
-#define ENC_R_B  7     // 오른앞 엔코더 B
+// 엔코더: 예전 코드와 같이 B상만 센다 (A상 불량). FL B = D3 인터럽트, FR B = D7 폴링.
+// 방향은 그때 내고 있는 PWM 부호로 정한다.
+#define USE_ENCODERS 1
+#define ENC_L_B  3     // FL 엔코더 B상 (INT1)
+#define ENC_R_B  7     // FR 엔코더 B상 (폴링)
 
-#define LINK_RX  A4    // ← ESP32 GPIO17
-#define LINK_TX  A5    // → 분압 → ESP32 GPIO18
+#define LINK_RX  10    // ← ESP32 GPIO17          (쉴드 S10)
+#define LINK_TX  11    // → 분압 → ESP32 GPIO18   (쉴드 S11, 선택)
 
 // =============================================================================
 //  설정
 // =============================================================================
-#define LINK_BAUD        38400
+#define LINK_BAUD        9600   // SoftwareSerial 은 느릴수록 안정. 20Hz×10바이트면 9600 으로 충분
 #define LINK_TIMEOUT_MS  300    // M 이 이만큼 안 오면 정지
 #define RAMP_MS_DEFAULT  700    // 0→255 램프 시간
 #define RAMP_TICK_MS     10
+#define SEND_STATUS      0      // 1 이면 E 상태를 S11 로 보냄. 보내는 동안 수신이 막히므로 S11 안 쓰면 0
 #define STATUS_MS        200    // E 상태 전송 주기
-#define TEST_PWM         100
+#define TEST_PWM         150
 #define TEST_HOLD_MS     1000
 
 SoftwareSerial link(LINK_RX, LINK_TX);
@@ -103,10 +109,16 @@ uint32_t testUntilMs = 0;         // USB 테스트 명령 유지 시각 (0 = 테
 bool     linkAlive   = false;
 
 // =============================================================================
-//  엔코더 ISR — A 상승 에지에서 B 로 방향
+//  엔코더 — B상 상승 에지만 센다. 부호는 현재 출력 방향
 // =============================================================================
-void isrEncL() { if (digitalRead(ENC_L_B)) encL++; else encL--; }
-void isrEncR() { if (digitalRead(ENC_R_B)) encR++; else encR--; }
+volatile int8_t encSignL = 1, encSignR = 1;
+void isrEncL() { encL += encSignL; }
+void pollEncR() {
+  static int last = HIGH;
+  int b = digitalRead(ENC_R_B);
+  if (b == HIGH && last == LOW) encR += encSignR;
+  last = b;
+}
 
 // =============================================================================
 //  모터 출력
@@ -121,6 +133,8 @@ void outMotor(uint8_t pwmPin, uint8_t dirPin, int v, bool inv) {
 void applyOutput() {
   outMotor(L_PWM, L_DIR, curL, L_INVERT);
   outMotor(R_PWM, R_DIR, curR, R_INVERT);
+  if (curL) encSignL = (curL > 0) ? 1 : -1;
+  if (curR) encSignR = (curR > 0) ? 1 : -1;
 }
 
 void hardStop() {
@@ -233,28 +247,29 @@ LineBuf linkBuf, usbBuf;
 void setup() {
   pinMode(L_PWM, OUTPUT);  pinMode(L_DIR, OUTPUT);
   pinMode(R_PWM, OUTPUT);  pinMode(R_DIR, OUTPUT);
-  pinMode(RL_PWM, OUTPUT); pinMode(RR_PWM, OUTPUT);
-  analogWrite(RL_PWM, 0);  analogWrite(RR_PWM, 0);   // 뒷바퀴 채널 0 고정
   hardStop();
 
-  pinMode(ENC_L_A, INPUT_PULLUP); pinMode(ENC_L_B, INPUT_PULLUP);
-  pinMode(ENC_R_A, INPUT_PULLUP); pinMode(ENC_R_B, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(ENC_L_A), isrEncL, RISING);
-  attachInterrupt(digitalPinToInterrupt(ENC_R_A), isrEncR, RISING);
+#if USE_ENCODERS
+  pinMode(ENC_L_B, INPUT_PULLUP); pinMode(ENC_R_B, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(ENC_L_B), isrEncL, RISING);
+#endif
 
   Serial.begin(115200);
   link.begin(LINK_BAUD);
   Serial.println(F("[uno] drive link ready (front 2WD). f/b/l/r/s/?/e/ramp<ms>"));
-  link.println(F("[uno] drive link ready"));
 }
 
 void loop() {
   uint32_t now = millis();
   char *line;
 
+#if USE_ENCODERS
+  pollEncR();
+#endif
+
   // ── ESP32 링크 수신 ──
   while (link.available()) {
-    if (linkBuf.feed((char)link.read(), line)) handleLine(line, link, true);
+    if (linkBuf.feed((char)link.read(), line)) handleLine(line, Serial, true);   // 응답은 USB 로만
   }
   // ── USB 시리얼 수신 ──
   while (Serial.available()) {
@@ -262,6 +277,9 @@ void loop() {
   }
 
   // ── 링크 상태 전이 ──
+  // now 는 입력 처리 뒤에 다시 읽는다. 위에서 읽은 값을 쓰면 handleLine 안에서 찍은
+  // lastCmdMs 가 now 보다 커져 (now - lastCmdMs) 가 뒤집히고 워치독이 매 루프 오작동한다.
+  now = millis();
   bool alive = (lastCmdMs != 0) && (now - lastCmdMs < LINK_TIMEOUT_MS);
   if (alive != linkAlive) {
     linkAlive = alive;
@@ -282,7 +300,8 @@ void loop() {
 
   rampTick();
 
-  // ── 상태 전송 ──
+  // ── 상태 전송 (S11 연결 시) ──
+#if SEND_STATUS
   if (now - lastStatMs >= STATUS_MS) {
     lastStatMs = now;
     long l, r;
@@ -290,4 +309,5 @@ void loop() {
     link.print(F("E ")); link.print(l); link.print(' '); link.print(r);
     link.print(' ');     link.print(curL); link.print(' '); link.println(curR);
   }
+#endif
 }

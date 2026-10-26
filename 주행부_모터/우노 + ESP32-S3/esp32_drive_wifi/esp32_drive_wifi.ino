@@ -69,6 +69,7 @@
 
 #include <WiFi.h>
 #include <lwip/sockets.h>
+#include <esp_system.h>
 
 // =============================================================================
 //  와이파이 / TCP
@@ -122,6 +123,22 @@ void outPrintf(const char *fmt, ...) {
   if (n > (int)sizeof(buf) - 1) n = sizeof(buf) - 1;
   Serial.write((uint8_t *)buf, n);
   if (tcpClient && tcpClient.connected()) send(tcpClient.fd(), buf, n, MSG_DONTWAIT);
+}
+
+// 리셋 원인 — 접속할 때와 ? 에 찍는다. 주행 중 TCP 가 끊겼으면 이걸로 보드가 죽었는지 본다
+const char *resetReasonStr() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:  return "전원 켬";
+    case ESP_RST_SW:       return "소프트 리셋 (업로드·재시작)";
+    case ESP_RST_PANIC:    return "PANIC (코드 예외)";
+    case ESP_RST_INT_WDT:  return "인터럽트 워치독";
+    case ESP_RST_TASK_WDT: return "태스크 워치독";
+    case ESP_RST_WDT:      return "워치독";
+    case ESP_RST_BROWNOUT: return "BROWNOUT (전원 전압 떨어짐)";
+    case ESP_RST_DEEPSLEEP:return "딥슬립";
+    case ESP_RST_EXT:      return "외부 리셋 핀";
+    default:               return "알 수 없음";
+  }
 }
 
 // =============================================================================
@@ -243,6 +260,7 @@ void handleLine(char *line) {
     return;
   }
   if (strcmp(line, "?") == 0) {
+    outPrintf("[state] 가동 %lu s  리셋 원인: %s\n", (unsigned long)(millis() / 1000), resetReasonStr());
     outPrintf("[state] v %d  vmin %d  vstep %d  지금 %d  hold %lu ms  cmd L:%d R:%d  moving:%c  tcp:%s\n",
               speedVal, speedMin, speedStep, speedCur, (unsigned long)holdMs, cmdL, cmdR, moving ? moving : '-',
               (tcpClient && tcpClient.connected()) ? tcpClient.remoteIP().toString().c_str() : "미접속");
@@ -288,6 +306,7 @@ void setup() {
   Serial.printf("\n=== 와이파이 AP  SSID %s  비밀번호 %s  IP %s  TCP %d ===\n",
                 WIFI_SSID, WIFI_PASS, WiFi.softAPIP().toString().c_str(), TCP_PORT);
   Serial.printf("=== 우노 링크 Serial1 TX=%d RX=%d %d baud ===\n", UNO_TX_PIN, UNO_RX_PIN, UNO_BAUD);
+  Serial.printf("=== 리셋 원인: %s ===\n", resetReasonStr());
   Serial.println("명령: w a s d (또 누르면 가속, w1500 = 1.5초) / x 정지 / ! 비상 / v150 vmin70 vstep20 / hold0 / ramp700 / ?");
   emergencyStop();
 }
@@ -304,6 +323,7 @@ void loop() {
       tcpClient = tcpServer.available();
       tcpClient.setNoDelay(true);
       outPrintf(">>> TCP 접속 %s\n", tcpClient.remoteIP().toString().c_str());
+      outPrintf("보드 가동 %lu s  리셋 원인: %s\n", (unsigned long)(millis() / 1000), resetReasonStr());
       outPrintf("명령: w a s d (또 누르면 가속, w1500 = 1.5초) / x 정지 / ! 비상 / v150 vmin70 vstep20 / hold0 / ramp700 / ?\n");
     }
   }

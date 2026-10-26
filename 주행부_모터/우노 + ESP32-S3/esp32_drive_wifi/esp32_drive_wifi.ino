@@ -29,10 +29,14 @@
  * 명령 (TCP / USB 공용, 줄 단위)
  *
  *   w  a  s  d        전진 / 좌회전 / 후진 / 우회전. 다음 명령이 올 때까지 (최대 hold 시간)
- *   w1500             1500ms 동안 전진 후 자동 정지 (a/s/d 도 동일). 실험 사이클용
+ *                     처음 누르면 vmin(기본 80) 으로 천천히, 같은 키를 또 누를 때마다
+ *                     vstep(기본 40) 씩 빨라져 v(기본 150) 까지. 다른 키·정지 뒤엔 다시 vmin 부터
+ *   w1500             1500ms 동안 전진 후 자동 정지 (a/s/d 도 동일). 실험 사이클용. 단계 올리기는 같음
  *   x  stop  빈 줄     정지 (우노 램프 따라 서서히)
  *   !                 비상 정지 (램프 없이 즉시)
- *   v<0~255>          속도 (기본 150)
+ *   v<0~255>          최고 속도 (기본 150). 주행 중이면 현재 속도를 이 값으로 바로 바꿈
+ *   vmin<0~255>       첫 단계 속도 (기본 80)
+ *   vstep<1~255>      한 번 더 누를 때 올라가는 양 (기본 40)
  *   hold<ms>          w 만 쳤을 때 최대 주행 시간 (기본 3000, 0 = 무제한)
  *   ramp<ms>          우노 램프 시간 (기본 700, 0 = 즉시) — 우노로 전달
  *   ?                 상태 + 우노 마지막 보고
@@ -86,10 +90,15 @@ WiFiClient tcpClient;
 // =============================================================================
 //  주행 상태
 // =============================================================================
-#define SPEED_DEFAULT   150
+#define SPEED_DEFAULT   150          // 최고 속도 (v)
+#define SPEED_MIN_DEFAULT  80        // 첫 단계 속도 (vmin)
+#define SPEED_STEP_DEFAULT 40        // 같은 키 한 번 더 → 이만큼 증가 (vstep)
 #define HOLD_MS_DEFAULT 3000         // w 만 쳤을 때 최대 주행 시간 (0 = 무제한)
 
-int      speedVal   = SPEED_DEFAULT;
+int      speedVal   = SPEED_DEFAULT; // 최고 속도
+int      speedMin   = SPEED_MIN_DEFAULT;
+int      speedStep  = SPEED_STEP_DEFAULT;
+int      speedCur   = 0;             // 지금 단계의 속도 (정지 중 0)
 uint32_t holdMs     = HOLD_MS_DEFAULT;
 int      cmdL = 0, cmdR = 0;         // 우노에 보낼 목표 PWM
 char     moving     = 0;             // 'w' 'a' 's' 'd' 또는 0
@@ -131,21 +140,23 @@ void setCmd(int l, int r) {
 }
 
 void stopDrive(const char *why) {
-  moving = 0; moveEndMs = 0;
+  moving = 0; moveEndMs = 0; speedCur = 0;
   setCmd(0, 0);
   if (why) outPrintf("[stop] %s\n", why);
 }
 
 void emergencyStop() {
-  moving = 0; moveEndMs = 0;
+  moving = 0; moveEndMs = 0; speedCur = 0;
   cmdL = cmdR = 0;
   sendUnoCmd();
   Serial1.println("X");
   outPrintf("[stop] EMERGENCY\n");
 }
 
-/* key: 'w' 'a' 's' 'd', durMs: 0 이면 hold 설정 적용 */
-void startDrive(char key, uint32_t durMs) {
+/* key: 'w' 'a' 's' 'd', durMs: 0 이면 hold 설정 적용
+ * bump: true 면 키 입력에 의한 호출 — 같은 키로 달리는 중이면 한 단계 올리고,
+ *       아니면(처음·다른 키·정지 뒤) vmin 부터. false 면 속도 설정만 바뀐 것이라 단계 유지 */
+void startDrive(char key, uint32_t durMs, bool bump) {
   int fwd = 0, turn = 0;
   switch (key) {
     case 'w': fwd =  1; break;
@@ -153,14 +164,19 @@ void startDrive(char key, uint32_t durMs) {
     case 'a': turn = -1; break;
     case 'd': turn =  1; break;
   }
-  int left  = (fwd + turn) * speedVal;
-  int right = (fwd - turn) * speedVal;
+  if (bump) {
+    if (moving == key && speedCur > 0) speedCur += speedStep;   // 같은 키 또 누름 → 한 단계 위
+    else                               speedCur  = speedMin;    // 처음 / 방향 바꿈 / 정지 뒤
+  }
+  if (speedCur > speedVal) speedCur = speedVal;                 // v 가 상한
+  int left  = (fwd + turn) * speedCur;
+  int right = (fwd - turn) * speedCur;
   moving = key;
   uint32_t dur = durMs ? durMs : holdMs;
   moveEndMs = dur ? millis() + dur : 0;
   setCmd(left, right);
-  if (dur) outPrintf("[drive] %c  %lu ms\n", key, (unsigned long)dur);
-  else     outPrintf("[drive] %c  (x 로 정지)\n", key);
+  if (dur) outPrintf("[drive] %c  속도 %d/%d  %lu ms\n", key, speedCur, speedVal, (unsigned long)dur);
+  else     outPrintf("[drive] %c  속도 %d/%d  (x 로 정지)\n", key, speedCur, speedVal);
 }
 
 // =============================================================================
@@ -196,13 +212,26 @@ void handleLine(char *line) {
   char k = line[0];
   if ((k == 'w' || k == 'a' || k == 's' || k == 'd') && (n == 1 || isDigit(line[1]))) {
     uint32_t dur = (n > 1) ? (uint32_t)atol(line + 1) : 0;
-    startDrive(k, dur);
+    startDrive(k, dur, true);
+    return;
+  }
+  if (strncmp(line, "vmin", 4) == 0 && isDigit(line[4])) {
+    speedMin = constrain(atoi(line + 4), 0, 255);
+    outPrintf("[cmd] vmin = %d (첫 단계)\n", speedMin);
+    return;
+  }
+  if (strncmp(line, "vstep", 5) == 0 && isDigit(line[5])) {
+    speedStep = constrain(atoi(line + 5), 1, 255);
+    outPrintf("[cmd] vstep = %d (한 단계)\n", speedStep);
     return;
   }
   if (k == 'v' && n > 1 && isDigit(line[1])) {
     speedVal = constrain(atoi(line + 1), 0, 255);
-    outPrintf("[cmd] speed = %d\n", speedVal);
-    if (moving) startDrive(moving, moveEndMs ? (moveEndMs - millis()) : 0);  // 주행 중이면 즉시 반영
+    outPrintf("[cmd] v = %d (최고)\n", speedVal);
+    if (moving) {                                    // 주행 중이면 지금 속도를 이 값으로
+      speedCur = speedVal;
+      startDrive(moving, moveEndMs ? (moveEndMs - millis()) : 0, false);
+    }
     return;
   }
   if (strncmp(line, "hold", 4) == 0 && isDigit(line[4])) {
@@ -211,8 +240,8 @@ void handleLine(char *line) {
     return;
   }
   if (strcmp(line, "?") == 0) {
-    outPrintf("[state] speed %d  hold %lu ms  cmd L:%d R:%d  moving:%c  tcp:%s\n",
-              speedVal, (unsigned long)holdMs, cmdL, cmdR, moving ? moving : '-',
+    outPrintf("[state] v %d  vmin %d  vstep %d  지금 %d  hold %lu ms  cmd L:%d R:%d  moving:%c  tcp:%s\n",
+              speedVal, speedMin, speedStep, speedCur, (unsigned long)holdMs, cmdL, cmdR, moving ? moving : '-',
               (tcpClient && tcpClient.connected()) ? tcpClient.remoteIP().toString().c_str() : "미접속");
     if (lastUnoRxMs == 0)
       outPrintf("[uno]   보고 없음 (S11 선 미연결?)\n");
@@ -256,7 +285,7 @@ void setup() {
   Serial.printf("\n=== 와이파이 AP  SSID %s  비밀번호 %s  IP %s  TCP %d ===\n",
                 WIFI_SSID, WIFI_PASS, WiFi.softAPIP().toString().c_str(), TCP_PORT);
   Serial.printf("=== 우노 링크 Serial1 TX=%d RX=%d %d baud ===\n", UNO_TX_PIN, UNO_RX_PIN, UNO_BAUD);
-  Serial.println("명령: w a s d (w1500 = 1.5초) / x 정지 / ! 비상 / v150 / hold3000 / ramp700 / ?");
+  Serial.println("명령: w a s d (또 누르면 가속, w1500 = 1.5초) / x 정지 / ! 비상 / v150 vmin80 vstep40 / hold3000 / ramp700 / ?");
   emergencyStop();
 }
 
@@ -272,7 +301,7 @@ void loop() {
       tcpClient = tcpServer.available();
       tcpClient.setNoDelay(true);
       outPrintf(">>> TCP 접속 %s\n", tcpClient.remoteIP().toString().c_str());
-      outPrintf("명령: w a s d (w1500 = 1.5초) / x 정지 / ! 비상 / v150 / hold3000 / ramp700 / ?\n");
+      outPrintf("명령: w a s d (또 누르면 가속, w1500 = 1.5초) / x 정지 / ! 비상 / v150 vmin80 vstep40 / hold3000 / ramp700 / ?\n");
     }
   }
   // ── TCP 끊김 → 정지 ──

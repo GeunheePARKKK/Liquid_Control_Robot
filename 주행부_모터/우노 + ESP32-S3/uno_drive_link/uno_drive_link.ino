@@ -215,9 +215,14 @@ void rampTick() {
 // =============================================================================
 //  명령 처리 — 링크(ESP32)와 USB 공용
 // =============================================================================
+static inline int sgn(int v) { return (v > 0) - (v < 0); }
+
 void setTarget(int l, int r) {
-  tgtL = constrain(l, -255, 255);
-  tgtR = constrain(r, -255, 255);
+  l = constrain(l, -255, 255);
+  r = constrain(r, -255, 255);
+  // 방향 조합이 바뀌면(정지↔출발, 직진↔회전) 균형 trim 은 처음부터. 같은 방향에서 속도만 바뀌면 유지
+  if (sgn(l) != sgn(tgtL) || sgn(r) != sgn(tgtR)) balI = balP = 0;
+  tgtL = l; tgtR = r;
 }
 
 void startTest(int l, int r, const __FlashStringHelper *name, Stream &out) {

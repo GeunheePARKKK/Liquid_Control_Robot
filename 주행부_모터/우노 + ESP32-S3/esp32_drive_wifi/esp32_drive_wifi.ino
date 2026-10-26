@@ -28,7 +28,7 @@
  * ─────────────────────────────────────────────────────────────────────────────
  * 명령 (TCP / USB 공용, 줄 단위)
  *
- *   w  a  s  d        전진 / 좌회전 / 후진 / 우회전. 다음 명령이 올 때까지 (최대 hold 시간)
+ *   w  a  s  d        전진 / 좌회전 / 후진 / 우회전. x 를 칠 때까지 계속 (시간 제한 없음)
  *                     처음 누르면 vmin(기본 70) 으로 천천히, 같은 키를 또 누를 때마다
  *                     vstep(기본 20) 씩 빨라져 v(기본 150) 까지 → 70 90 110 130 150 의 5단.
  *                     다른 키·정지 뒤엔 다시 vmin 부터
@@ -38,7 +38,7 @@
  *   v<0~255>          최고 속도 (기본 150). 주행 중이면 현재 속도를 이 값으로 바로 바꿈
  *   vmin<0~255>       첫 단계 속도 (기본 70)
  *   vstep<1~255>      한 번 더 누를 때 올라가는 양 (기본 20)
- *   hold<ms>          w 만 쳤을 때 최대 주행 시간 (기본 3000, 0 = 무제한)
+ *   hold<ms>          w 만 쳤을 때 최대 주행 시간 (기본 0 = 무제한. 혼자 멈추는 게 싫어서 끔)
  *   ramp<ms>          우노 램프 시간 (기본 700, 0 = 즉시) — 우노로 전달
  *   ?                 상태 + 우노 마지막 보고
  *   e                 우노 엔코더 카운트 0 (우노로 전달)
@@ -48,7 +48,7 @@
  * 안전
  *
  *   - TCP 접속이 끊기면 정지
- *   - w 만 친 경우 hold 시간(기본 3초)이 지나면 정지 — 노트북이 멈춰도 계속 달리지 않게
+ *   - hold<ms> 를 주면 w 만 친 경우 그 시간 뒤 정지 (기본 0 = 안 멈춤)
  *   - 우노는 M 이 300ms 안 오면 스스로 정지 (선 빠짐·이 보드 리셋)
  *
  * ─────────────────────────────────────────────────────────────────────────────
@@ -94,7 +94,7 @@ WiFiClient tcpClient;
 #define SPEED_DEFAULT   150          // 최고 속도 (v)
 #define SPEED_MIN_DEFAULT  70        // 첫 단계 속도 (vmin)
 #define SPEED_STEP_DEFAULT 20        // 같은 키 한 번 더 → 이만큼 증가 (vstep). 70 90 110 130 150
-#define HOLD_MS_DEFAULT 3000         // w 만 쳤을 때 최대 주행 시간 (0 = 무제한)
+#define HOLD_MS_DEFAULT 0            // w 만 쳤을 때 최대 주행 시간 (0 = 무제한). 3000 이었으나 혼자 멈춰서 끔
 
 int      speedVal   = SPEED_DEFAULT; // 최고 속도
 int      speedMin   = SPEED_MIN_DEFAULT;
@@ -288,7 +288,7 @@ void setup() {
   Serial.printf("\n=== 와이파이 AP  SSID %s  비밀번호 %s  IP %s  TCP %d ===\n",
                 WIFI_SSID, WIFI_PASS, WiFi.softAPIP().toString().c_str(), TCP_PORT);
   Serial.printf("=== 우노 링크 Serial1 TX=%d RX=%d %d baud ===\n", UNO_TX_PIN, UNO_RX_PIN, UNO_BAUD);
-  Serial.println("명령: w a s d (또 누르면 가속, w1500 = 1.5초) / x 정지 / ! 비상 / v150 vmin70 vstep20 / hold3000 / ramp700 / ?");
+  Serial.println("명령: w a s d (또 누르면 가속, w1500 = 1.5초) / x 정지 / ! 비상 / v150 vmin70 vstep20 / hold0 / ramp700 / ?");
   emergencyStop();
 }
 
@@ -304,7 +304,7 @@ void loop() {
       tcpClient = tcpServer.available();
       tcpClient.setNoDelay(true);
       outPrintf(">>> TCP 접속 %s\n", tcpClient.remoteIP().toString().c_str());
-      outPrintf("명령: w a s d (또 누르면 가속, w1500 = 1.5초) / x 정지 / ! 비상 / v150 vmin70 vstep20 / hold3000 / ramp700 / ?\n");
+      outPrintf("명령: w a s d (또 누르면 가속, w1500 = 1.5초) / x 정지 / ! 비상 / v150 vmin70 vstep20 / hold0 / ramp700 / ?\n");
     }
   }
   // ── TCP 끊김 → 정지 ──

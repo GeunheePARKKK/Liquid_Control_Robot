@@ -82,6 +82,9 @@
  *     arm            모터 활성화 (현재 위치를 영점으로 잡고 켠다)
  *     stop  / s      비활성화
  *     z              모터 영점 재설정 — 지금 트레이 자세를 0 으로
+ *     lv             IMU 수평 영점 — 지금 차체 자세를 "수평" 으로 (lv0 해제).
+ *                    arm 때 안쪽이 확 꺾이면 IMU 가 정지 상태에서 0 이 아닌 것. 차체를 수평에
+ *                    두고 lv 한 번 치면 그 각도를 빼 준다. 부팅하면 0 으로 돌아온다
  *     t              시험 구동 8초 (IMU·제어식을 거치지 않는 CAN 경로 확인)
  *     q              스트림 출력 켜기/끄기
  *     ?              현재 상태 전부 출력
@@ -242,6 +245,7 @@ volatile float DIR_ROLL  = +1.0f;    // [dr] 기본 +1   바깥축 0x01
 
 // ── 제어 파라미터 ──
 volatile float GAIN            = 1.0f;    // [g]  기본 1.00   완전 수평 보상
+volatile float LVL_OFF_P = 0, LVL_OFF_R = 0;  // [lv] IMU 수평 영점 [°]. 제어식의 차체 자세에서 뺀다. 로그의 pitch/roll 은 안 뺀 원값
 const float LIMIT_DEG = 45.0f;   //      45°  지령 각도 상한. 기구 한계 45° (2026-09-04 확인)
 volatile float MAX_RATE        = 120.0f;  // [r]  실측 확정 120  요구 변화율 p95 가 109~112
                                  //      30 이면 지령의 31% 가 잘려 ZV 성형이 무너진다
@@ -1140,6 +1144,9 @@ void printStatus() {
   /* 값마다 어느 명령으로 바꾸는지 이름을 붙여 찍는다. 표를 다시 찾아보지
    * 않고 바로 고칠 수 있다.
    */
+  Serial.printf("       차체(p/r) %+.2f/%+.2f°   IMU 수평 영점(lv) %+.2f/%+.2f°   보정 뒤 %+.2f/%+.2f°\n",
+                pitch_filtered, roll_filtered, LVL_OFF_P, LVL_OFF_R,
+                pitch_filtered - LVL_OFF_P, roll_filtered - LVL_OFF_R);
   Serial.printf("       합력각(p/r) %.2f/%.2f°   자세보정게이트 %s/%s\n",
                 force_pitch, force_roll,
                 accGatePitch.active ? "BLOCK" : "TRACK",
@@ -1267,6 +1274,14 @@ void handleLine(const char *raw) {
     ctrlSend(2);
   } else if (u == "z") {
     ctrlSend(4);
+  } else if (u == "lv0") {
+    LVL_OFF_P = 0;  LVL_OFF_R = 0;
+    Serial.println(">>> IMU 수평 영점 해제 (0/0)");
+  } else if (u == "lv") {
+    /* ctrlTask 가 쓰는 float 두 개를 읽기만 한다. 차체가 가만히 있을 때 칠 것. */
+    LVL_OFF_P = pitch_filtered;  LVL_OFF_R = roll_filtered;
+    Serial.printf(">>> IMU 수평 영점 = %+.2f / %+.2f°  (안쪽 / 바깥)  지금 자세를 수평으로 본다%s\n",
+                  LVL_OFF_P, LVL_OFF_R, armed ? "  — ARMED 라 트레이가 그만큼 이동합니다" : "");
   } else if (u == "t") {
     ctrlBusy = true;  if (!ctrlSend(3)) ctrlBusy = false;   // 8초 파서 정지
   /* kpp/kpr/kdp/kdr 은 kp/kd 보다 반드시 먼저 검사한다.
@@ -1552,6 +1567,8 @@ void setup() {
   Serial.println("--------------------------------------------------");
   Serial.println("  arm     활성화        stop  비활성화");
   Serial.println("  t       시험 구동     z     영점 재설정");
+  Serial.printf ("  lv      IMU 수평 영점 (지금 차체 자세 = 수평)   lv0 해제   현재 %+.2f/%+.2f°\n",
+                 LVL_OFF_P, LVL_OFF_R);
   Serial.println("  g<값>   수평 게인     예) g1.0");
   Serial.printf ("  ag<값>  합력 게인     예) ag0.3   현재 %.2f%s\n",
                  ACC_GAIN, ACC_GAIN == 0.0f ? "  ← 0 이면 1단계와 동일" : "");
@@ -1758,8 +1775,11 @@ void ctrlTask(void *arg) {
     /* ACC_GAIN 이 0 이면 θ_ref 항이 사라져 1단계(−θ_base)와 완전히 같아진다.
      * 모터는 차체 기준으로 돌므로 절대 목표각에서 차체 자세를 뺀다.
      */
-    float want_pitch = ACC_GAIN * shaped_pitch - pitch_filtered * GAIN;
-    float want_roll  = ACC_GAIN * shaped_roll  - roll_filtered  * GAIN;
+    /* lv 로 잡은 수평 영점을 뺀다. IMU 가 비스듬히 붙어 있거나 차체가 기울어 있으면
+     * 정지 상태에서도 pitch_filtered 가 0 이 아니라 arm 하자마자 그만큼 꺾이기 때문.
+     */
+    float want_pitch = ACC_GAIN * shaped_pitch - (pitch_filtered - LVL_OFF_P) * GAIN;
+    float want_roll  = ACC_GAIN * shaped_roll  - (roll_filtered  - LVL_OFF_R) * GAIN;
 
     want_pitch = constrain(want_pitch, -LIMIT_DEG, LIMIT_DEG);
     want_roll  = constrain(want_roll,  -LIMIT_DEG, LIMIT_DEG);

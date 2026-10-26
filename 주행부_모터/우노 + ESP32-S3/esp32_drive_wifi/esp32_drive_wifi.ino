@@ -29,14 +29,15 @@
  * 명령 (TCP / USB 공용, 줄 단위)
  *
  *   w  a  s  d        전진 / 좌회전 / 후진 / 우회전. 다음 명령이 올 때까지 (최대 hold 시간)
- *                     처음 누르면 vmin(기본 80) 으로 천천히, 같은 키를 또 누를 때마다
- *                     vstep(기본 40) 씩 빨라져 v(기본 150) 까지. 다른 키·정지 뒤엔 다시 vmin 부터
+ *                     처음 누르면 vmin(기본 70) 으로 천천히, 같은 키를 또 누를 때마다
+ *                     vstep(기본 20) 씩 빨라져 v(기본 150) 까지 → 70 90 110 130 150 의 5단.
+ *                     다른 키·정지 뒤엔 다시 vmin 부터
  *   w1500             1500ms 동안 전진 후 자동 정지 (a/s/d 도 동일). 실험 사이클용. 단계 올리기는 같음
  *   x  stop  빈 줄     정지 (우노 램프 따라 서서히)
  *   !                 비상 정지 (램프 없이 즉시)
  *   v<0~255>          최고 속도 (기본 150). 주행 중이면 현재 속도를 이 값으로 바로 바꿈
- *   vmin<0~255>       첫 단계 속도 (기본 80)
- *   vstep<1~255>      한 번 더 누를 때 올라가는 양 (기본 40)
+ *   vmin<0~255>       첫 단계 속도 (기본 70)
+ *   vstep<1~255>      한 번 더 누를 때 올라가는 양 (기본 20)
  *   hold<ms>          w 만 쳤을 때 최대 주행 시간 (기본 3000, 0 = 무제한)
  *   ramp<ms>          우노 램프 시간 (기본 700, 0 = 즉시) — 우노로 전달
  *   ?                 상태 + 우노 마지막 보고
@@ -91,8 +92,8 @@ WiFiClient tcpClient;
 //  주행 상태
 // =============================================================================
 #define SPEED_DEFAULT   150          // 최고 속도 (v)
-#define SPEED_MIN_DEFAULT  80        // 첫 단계 속도 (vmin)
-#define SPEED_STEP_DEFAULT 40        // 같은 키 한 번 더 → 이만큼 증가 (vstep)
+#define SPEED_MIN_DEFAULT  70        // 첫 단계 속도 (vmin)
+#define SPEED_STEP_DEFAULT 20        // 같은 키 한 번 더 → 이만큼 증가 (vstep). 70 90 110 130 150
 #define HOLD_MS_DEFAULT 3000         // w 만 쳤을 때 최대 주행 시간 (0 = 무제한)
 
 int      speedVal   = SPEED_DEFAULT; // 최고 속도
@@ -169,14 +170,16 @@ void startDrive(char key, uint32_t durMs, bool bump) {
     else                               speedCur  = speedMin;    // 처음 / 방향 바꿈 / 정지 뒤
   }
   if (speedCur > speedVal) speedCur = speedVal;                 // v 가 상한
+  int stage  = (speedCur <= speedMin) ? 1 : 1 + (speedCur - speedMin + speedStep - 1) / speedStep;
+  int stages = (speedVal <= speedMin) ? 1 : 1 + (speedVal - speedMin + speedStep - 1) / speedStep;
   int left  = (fwd + turn) * speedCur;
   int right = (fwd - turn) * speedCur;
   moving = key;
   uint32_t dur = durMs ? durMs : holdMs;
   moveEndMs = dur ? millis() + dur : 0;
   setCmd(left, right);
-  if (dur) outPrintf("[drive] %c  속도 %d/%d  %lu ms\n", key, speedCur, speedVal, (unsigned long)dur);
-  else     outPrintf("[drive] %c  속도 %d/%d  (x 로 정지)\n", key, speedCur, speedVal);
+  if (dur) outPrintf("[drive] %c  %d단/%d단 속도 %d/%d  %lu ms\n", key, stage, stages, speedCur, speedVal, (unsigned long)dur);
+  else     outPrintf("[drive] %c  %d단/%d단 속도 %d/%d  (x 로 정지)\n", key, stage, stages, speedCur, speedVal);
 }
 
 // =============================================================================
@@ -285,7 +288,7 @@ void setup() {
   Serial.printf("\n=== 와이파이 AP  SSID %s  비밀번호 %s  IP %s  TCP %d ===\n",
                 WIFI_SSID, WIFI_PASS, WiFi.softAPIP().toString().c_str(), TCP_PORT);
   Serial.printf("=== 우노 링크 Serial1 TX=%d RX=%d %d baud ===\n", UNO_TX_PIN, UNO_RX_PIN, UNO_BAUD);
-  Serial.println("명령: w a s d (또 누르면 가속, w1500 = 1.5초) / x 정지 / ! 비상 / v150 vmin80 vstep40 / hold3000 / ramp700 / ?");
+  Serial.println("명령: w a s d (또 누르면 가속, w1500 = 1.5초) / x 정지 / ! 비상 / v150 vmin70 vstep20 / hold3000 / ramp700 / ?");
   emergencyStop();
 }
 
@@ -301,7 +304,7 @@ void loop() {
       tcpClient = tcpServer.available();
       tcpClient.setNoDelay(true);
       outPrintf(">>> TCP 접속 %s\n", tcpClient.remoteIP().toString().c_str());
-      outPrintf("명령: w a s d (또 누르면 가속, w1500 = 1.5초) / x 정지 / ! 비상 / v150 vmin80 vstep40 / hold3000 / ramp700 / ?\n");
+      outPrintf("명령: w a s d (또 누르면 가속, w1500 = 1.5초) / x 정지 / ! 비상 / v150 vmin70 vstep20 / hold3000 / ramp700 / ?\n");
     }
   }
   // ── TCP 끊김 → 정지 ──

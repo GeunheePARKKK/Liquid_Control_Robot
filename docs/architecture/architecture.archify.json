@@ -7,7 +7,7 @@
   "repository": {
    "url": "https://github.com/GeunheePARKKK/Liquid_Control_Robot",
    "provider": "github",
-   "revision": "7e22c4697a4fe58145e1acbc1fe2cc1ac130dd18"
+   "revision": "f430d7fc6539b559c440b8384d6f3ecb75a0c762"
   },
   "views": [
    {
@@ -35,16 +35,17 @@
     "label": "주행부와 서스펜션",
     "focus": [
      "drive",
+     "uno",
      "dcmotor",
      "sus",
      "stepper",
      "ctrl"
     ],
-    "note": "주행 보드는 별도 ESP32-S3. 서스펜션 스텝모터는 제어 보드의 susTask 가 구동."
+    "note": "주행은 우노(앞바퀴 2륜, 5 V 엔코더). ESP32-S3 는 WiFi AP·TCP 23 으로 노트북 w/a/s/d 를 받아 50 ms 마다 M L R 로 우노에 중계. 서스펜션은 제어 보드 susTask."
    }
   ],
   "viewBox": [
-   1100,
+   1170,
    500
   ]
  },
@@ -202,36 +203,63 @@
   {
    "id": "drive",
    "type": "backend",
-   "label": "주행 보드 ESP32-S3",
-   "sublabel": "5 s 주행 · 정지 반복 · 램프 가감속",
+   "label": "주행 링크 ESP32-S3",
+   "sublabel": "WiFi AP Drive_Robot · TCP 23",
    "pos": [
-    570,
+    555,
     210
    ],
    "size": [
-    210,
+    185,
     64
    ],
    "sources": [
     {
-     "path": "주행부_모터/README.md",
-     "label": "핀맵"
+     "path": "주행부_모터/우노 + ESP32-S3/esp32_drive_wifi/esp32_drive_wifi.ino",
+     "label": "AP · TCP · UART 중계"
+    }
+   ],
+   "tag": "drive_monitor.py"
+  },
+  {
+   "id": "uno",
+   "type": "backend",
+   "label": "우노 주행 보드",
+   "sublabel": "램프 700 ms · 워치독 300 ms",
+   "tag": "앞바퀴 2륜",
+   "pos": [
+    770,
+    210
+   ],
+   "size": [
+    160,
+    64
+   ],
+   "sources": [
+    {
+     "path": "주행부_모터/우노 + ESP32-S3/uno_drive_link/uno_drive_link.ino",
+     "label": "모터 · 엔코더"
+    },
+    {
+     "path": "주행부_모터/우노 + ESP32-S3/README.md",
+     "label": "배선표"
     }
    ]
   },
   {
    "id": "dcmotor",
    "type": "external",
-   "label": "MDD10A ×2 → DC 모터 ×4",
-   "sublabel": "PWM/DIR · 엔코더 ×4 (PCNT)",
+   "label": "MDD10A → DC 모터 ×2",
+   "sublabel": "PWM/DIR · 엔코더 B상 D3/D7",
    "pos": [
-    850,
+    960,
     210
    ],
    "size": [
-    210,
+    158,
     64
-   ]
+   ],
+   "tag": "D6/D4 · D9/D8"
   },
   {
    "id": "pc",
@@ -263,6 +291,7 @@
    "label": "주행부",
    "wraps": [
     "drive",
+    "uno",
     "dcmotor"
    ]
   }
@@ -351,8 +380,18 @@
    "labelDy": -22
   },
   {
-   "id": "drive-dc",
+   "id": "drive-uno",
    "from": "drive",
+   "to": "uno",
+   "label": "UART 9600 · M L R / 50 ms",
+   "labelAt": [
+    755,
+    288
+   ]
+  },
+  {
+   "id": "uno-dc",
+   "from": "uno",
    "to": "dcmotor"
   },
   {
@@ -393,7 +432,7 @@
    "items": [
     "루트 Liquid_Control_Robot.ino = zv_shaping_rtos + susTask",
     "docs/CONTROL_INTEGRATION_TASK: 1~4단계 + 변경이력",
-    "gimbal_control / step_control / 주행부_모터 / servo_control",
+    "gimbal_control / step_control / 주행부_모터 (우노 + ESP32-S3) / servo_control",
     "보고서 그림·요구사항 정의서는 바탕화면 (SVG 먼저, PNG)"
    ]
   }

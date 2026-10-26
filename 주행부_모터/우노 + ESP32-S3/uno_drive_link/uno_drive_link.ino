@@ -50,7 +50,7 @@
  *   X(비상 정지)와 링크 타임아웃만 램프 없이 즉시 0.
  *
  * ─────────────────────────────────────────────────────────────────────────────
- * USB 시리얼(115200) 테스트 명령 — 우노만 USB 로 꽂고 바퀴 들고 확인
+ * USB 시리얼(115200) 테스트 명령 — 바퀴 들고 확인. ESP32 가 붙어 있어도 된다 (1초 동안 링크 M 무시)
  *
  *   f / b / l / r   1초 동안 전진/후진/좌회전/우회전 (PWM 150). 반드시 Enter(새 줄)로 끝내야 한다
  *   s               정지
@@ -249,9 +249,13 @@ void handleLine(char *line, Stream &out, bool fromLink) {
     long l = strtol(line + 2, &end, 10);
     if (end == line + 2) return;                       // 숫자 아님 → 무시
     long r = strtol(end, &end, 10);
+    if (fromLink) {
+      lastCmdMs = millis();
+      if (testUntilMs) return;          // USB 테스트(f/b/l/r) 중엔 ESP32 의 M 0 0 이 덮어쓰지 않게
+    } else {
+      testUntilMs = 0;                  // USB 로 직접 친 M 은 테스트 취소
+    }
     setTarget((int)l, (int)r);
-    if (fromLink) lastCmdMs = millis();
-    testUntilMs = 0;
     return;
   }
   if (strcmp(line, "X") == 0 || strcmp(line, "x") == 0) {

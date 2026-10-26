@@ -34,6 +34,7 @@
  *     X                  비상 정지 (램프 없이 즉시 0)
  *     ramp<ms>           램프 시간 변경 (0 = 램프 없음)
  *     ramp<ms> e ?       램프 변경 / 엔코더 0 / 상태
+ *     bal0 / bal1        엔코더 좌우 균형 보정 끄기 / 켜기 (기본 켬)
  *     (f b l r 테스트는 USB 전용 — ESP32 가 보내는 M 에 바로 덮인다)
  *   우노 → ESP32 (SEND_STATUS 1 일 때만. SoftwareSerial 은 보내는 동안 못 받으므로 기본 0)
  *     E <encL> <encR> <pwmL> <pwmR>   200ms 마다 상태
@@ -56,6 +57,7 @@
  *   ?               상태
  *   e               엔코더 카운트 0 으로
  *   ramp<ms>        램프 시간 (예: ramp0, ramp700)
+ *   bal0 / bal1     엔코더 좌우 균형 보정 끄기 / 켜기
  *
  *   'f' 를 쳤는데 한쪽 바퀴가 뒤로 돌면 그쪽 *_INVERT 를 뒤집는다.
  * -----------------------------------------------------------------------------
@@ -96,6 +98,18 @@
 #define TEST_PWM         150
 #define TEST_HOLD_MS     1000
 
+// 엔코더 피드백 — 좌우 속도 균형 (직진 보정)
+//   50ms 마다 두 바퀴 속도(cps)를 재고, "PWM 1 당 cps" 가 좌우 같아지도록 trim 을 적분한다.
+//   출력 = 램프값 × (1 ∓ trim).  명령 비율(직진 1:1, 제자리 회전 1:−1)을 그대로 유지하면서
+//   빠른 쪽을 줄이고 느린 쪽을 올린다.  bal0 / bal1 로 끄고 켠다.
+#define SPEED_MS         50     // 속도 측정 주기
+#define SPEED_LPF        0.4f   // 속도 저역 필터 (0~1, 클수록 빠름)
+#define BAL_DEFAULT      1      // 1 = 균형 제어 켜고 시작
+#define BAL_KP           0.3f   // 비례
+#define BAL_KI           1.0f   // 적분 (/s)
+#define BAL_TRIM_MAX     0.35f  // trim 한계 (±35 %)
+#define BAL_MIN_CPS      20     // 두 바퀴 속도 합이 이보다 작으면 판단 안 함 (정지·출발 직후)
+
 SoftwareSerial link(LINK_RX, LINK_TX);
 
 volatile long encL = 0, encR = 0;
@@ -107,6 +121,13 @@ uint32_t lastRampMs  = 0;
 uint32_t lastStatMs  = 0;
 uint32_t testUntilMs = 0;         // USB 테스트 명령 유지 시각 (0 = 테스트 아님)
 bool     linkAlive   = false;
+
+float    spdL = 0, spdR = 0;      // 측정 속도 (counts/s, 필터)
+float    balI = 0, balP = 0;      // 균형 trim 의 적분·비례 성분
+bool     balOn = BAL_DEFAULT;
+int      outL = 0, outR = 0;      // 균형 보정 뒤 실제 모터에 간 값
+uint32_t lastSpeedMs = 0;
+long     lastEncL = 0, lastEncR = 0;
 
 // =============================================================================
 //  엔코더 — B상 상승 에지만 센다. 부호는 현재 출력 방향
@@ -131,10 +152,39 @@ void outMotor(uint8_t pwmPin, uint8_t dirPin, int v, bool inv) {
 }
 
 void applyOutput() {
-  outMotor(L_PWM, L_DIR, curL, L_INVERT);
-  outMotor(R_PWM, R_DIR, curR, R_INVERT);
+  float t = balOn ? constrain(balI + balP, -BAL_TRIM_MAX, BAL_TRIM_MAX) : 0.0f;
+  outL = constrain((int)lroundf(curL * (1.0f - t)), -255, 255);
+  outR = constrain((int)lroundf(curR * (1.0f + t)), -255, 255);
+  outMotor(L_PWM, L_DIR, outL, L_INVERT);
+  outMotor(R_PWM, R_DIR, outR, R_INVERT);
   if (curL) encSignL = (curL > 0) ? 1 : -1;
   if (curR) encSignR = (curR > 0) ? 1 : -1;
+}
+
+// =============================================================================
+//  속도 측정 + 좌우 균형
+// =============================================================================
+void speedTick() {
+  uint32_t now = millis();
+  if (now - lastSpeedMs < SPEED_MS) return;
+  float dt = (now - lastSpeedMs) * 1e-3f;
+  lastSpeedMs = now;
+
+  long l, r;
+  noInterrupts(); l = encL; r = encR; interrupts();
+  float vL = (l - lastEncL) / dt, vR = (r - lastEncR) / dt;
+  lastEncL = l; lastEncR = r;
+  spdL += SPEED_LPF * (vL - spdL);
+  spdR += SPEED_LPF * (vR - spdR);
+
+  if (!balOn || curL == 0 || curR == 0) { balP = 0; return; }   // 한쪽이 0 이면 비율이 없다
+  if (fabsf(spdL) + fabsf(spdR) < BAL_MIN_CPS) { balP = 0; return; }
+
+  float sL = spdL / curL, sR = spdR / curR;      // PWM 1 당 cps (방향 맞으면 양수)
+  float e  = (sL - sR) / (fabsf(sL) + fabsf(sR) + 1e-6f);   // −1 ~ +1. 왼쪽이 빠르면 +
+  balP  = BAL_KP * e;
+  balI += BAL_KI * e * dt;
+  balI  = constrain(balI, -BAL_TRIM_MAX, BAL_TRIM_MAX);
 }
 
 void hardStop() {
@@ -180,6 +230,10 @@ void printState(Stream &out) {
   out.print(F("[state] tgt "));  out.print(tgtL); out.print(' '); out.print(tgtR);
   out.print(F("  out "));        out.print(curL); out.print(' '); out.print(curR);
   out.print(F("  enc "));        out.print(encL); out.print(' '); out.print(encR);
+  out.print(F("  spd "));        out.print((int)spdL); out.print(' '); out.print((int)spdR);
+  out.print(F("cps  bal "));     out.print(balOn ? F("on ") : F("off "));
+  out.print((int)lroundf((balI + balP) * 100)); out.print(F("%  motor "));
+  out.print(outL); out.print(' '); out.print(outR);
   out.print(F("  ramp "));       out.print(rampMs);
   out.print(F("ms  link "));     out.println(linkAlive ? F("up") : F("down"));
 }
@@ -206,6 +260,12 @@ void handleLine(char *line, Stream &out, bool fromLink) {
     out.println(F("[cmd] emergency stop"));
     return;
   }
+  if (strncmp(line, "bal", 3) == 0 && (line[3] == '0' || line[3] == '1')) {
+    balOn = (line[3] == '1');
+    balI = balP = 0;
+    out.print(F("[cmd] balance ")); out.println(balOn ? F("on") : F("off"));
+    return;
+  }
   if (strncmp(line, "ramp", 4) == 0) {
     rampMs = (uint16_t)constrain(atol(line + 4), 0, 10000);
     out.print(F("[cmd] ramp = ")); out.print(rampMs); out.println(F(" ms"));
@@ -219,7 +279,7 @@ void handleLine(char *line, Stream &out, bool fromLink) {
       case 'r': startTest( TEST_PWM, -TEST_PWM, F("right"),    out); return;
       case 's': setTarget(0, 0); testUntilMs = 0; out.println(F("[test] stop")); return;
       case '?': printState(out); return;
-      case 'e': noInterrupts(); encL = encR = 0; interrupts(); out.println(F("[cmd] enc zero")); return;
+      case 'e': noInterrupts(); encL = encR = 0; interrupts(); lastEncL = lastEncR = 0; out.println(F("[cmd] enc zero")); return;
     }
   }
   out.print(F("[cmd] unknown: ")); out.println(line);
@@ -256,7 +316,7 @@ void setup() {
 
   Serial.begin(115200);
   link.begin(LINK_BAUD);
-  Serial.println(F("[uno] drive link ready (front 2WD). f/b/l/r/s/?/e/ramp<ms>"));
+  Serial.println(F("[uno] drive link ready (front 2WD, encoder balance). f/b/l/r/s/?/e/ramp<ms>/bal0/bal1"));
 }
 
 void loop() {
@@ -298,6 +358,9 @@ void loop() {
     Serial.println(F("[wd] link timeout -> stop"));
   }
 
+#if USE_ENCODERS
+  speedTick();          // 속도 측정 + 좌우 균형 trim
+#endif
   rampTick();
 
   // ── 상태 전송 (S11 연결 시) ──
@@ -307,7 +370,7 @@ void loop() {
     long l, r;
     noInterrupts(); l = encL; r = encR; interrupts();
     link.print(F("E ")); link.print(l); link.print(' '); link.print(r);
-    link.print(' ');     link.print(curL); link.print(' '); link.println(curR);
+    link.print(' ');     link.print(outL); link.print(' '); link.println(outR);
   }
 #endif
 }

@@ -32,8 +32,9 @@
  *   ESP32 → 우노
  *     M <left> <right>   −255~+255. 부호 = 방향. 키가 눌려 있든 아니든 50ms 마다 온다
  *     X                  비상 정지 (램프 없이 즉시 0)
- *     ramp<ms>           램프 시간 변경 (0 = 램프 없음)
- *     ramp<ms> e ?       램프 변경 / 엔코더 0 / 상태
+ *     ramp<ms>           가속 램프 시간 (0→255 기준, 0 = 램프 없음)
+ *     rampd<ms>          감속 램프 시간 (255→0 기준). x 를 쳐도 이 시간에 걸쳐 서서히 선다
+ *     e ?                엔코더 0 / 상태
  *     bal0 / bal1        엔코더 좌우 균형 보정 끄기 / 켜기 (기본 켬)
  *     (f b l r 테스트는 USB 전용 — ESP32 가 보내는 M 에 바로 덮인다)
  *   우노 → ESP32 (SEND_STATUS 1 일 때만. SoftwareSerial 은 보내는 동안 못 받으므로 기본 0)
@@ -56,7 +57,7 @@
  *   s               정지
  *   ?               상태
  *   e               엔코더 카운트 0 으로
- *   ramp<ms>        램프 시간 (예: ramp0, ramp700)
+ *   ramp<ms>        가속 램프 (예: ramp0, ramp700)     rampd<ms>  감속 램프 (예: rampd1500)
  *   bal0 / bal1     엔코더 좌우 균형 보정 끄기 / 켜기
  *
  *   'f' 를 쳤는데 한쪽 바퀴가 뒤로 돌면 그쪽 *_INVERT 를 뒤집는다.
@@ -91,7 +92,8 @@
 // =============================================================================
 #define LINK_BAUD        9600   // SoftwareSerial 은 느릴수록 안정. 20Hz×10바이트면 9600 으로 충분
 #define LINK_TIMEOUT_MS  300    // M 이 이만큼 안 오면 정지
-#define RAMP_MS_DEFAULT  700    // 0→255 램프 시간
+#define RAMP_MS_DEFAULT       700   // 가속 램프: 0→255 시간 (ramp)
+#define RAMP_DOWN_MS_DEFAULT 1500   // 감속 램프: 255→0 시간 (rampd). 실험용 — 출발은 세게, 정지는 서서히
 #define RAMP_TICK_MS     10
 #define SEND_STATUS      0      // 1 이면 E 상태를 S11 로 보냄. 보내는 동안 수신이 막히므로 S11 안 쓰면 0
 #define STATUS_MS        200    // E 상태 전송 주기
@@ -116,6 +118,7 @@ volatile long encL = 0, encR = 0;
 int      tgtL = 0, tgtR = 0;      // 목표 PWM (−255~255)
 int      curL = 0, curR = 0;      // 램프 적용 후 실제 출력
 uint16_t rampMs      = RAMP_MS_DEFAULT;
+uint16_t rampDownMs  = RAMP_DOWN_MS_DEFAULT;
 uint32_t lastCmdMs   = 0;         // 마지막 유효 M
 uint32_t lastRampMs  = 0;
 uint32_t lastStatMs  = 0;
@@ -198,17 +201,27 @@ int stepToward(int cur, int tgt, int step) {
   return cur;
 }
 
+/* 바퀴 하나의 램프 한 틱. |목표| < |현재| (느려지는 중) 면 감속 램프, 아니면 가속 램프.
+ * 방향이 바뀌는 경우(+100 → −100)는 0 까지는 감속 램프로, 0 을 지나면 가속 램프로 간다.
+ */
+int rampOne(int cur, int tgt) {
+  bool slowing = (abs(tgt) < abs(cur)) || ((long)cur * tgt < 0);
+  uint16_t ms = slowing ? rampDownMs : rampMs;
+  if (ms == 0) return tgt;
+  int step = max(1, (int)((255L * RAMP_TICK_MS + ms / 2) / ms));
+  if (slowing && (long)cur * tgt < 0) {            // 부호 반전: 먼저 0 까지만
+    int z = stepToward(cur, 0, step);
+    return z;
+  }
+  return stepToward(cur, tgt, step);
+}
+
 void rampTick() {
   uint32_t now = millis();
   if (now - lastRampMs < RAMP_TICK_MS) return;
   lastRampMs = now;
-  if (rampMs == 0) {
-    curL = tgtL; curR = tgtR;
-  } else {
-    int step = max(1, (int)((255L * RAMP_TICK_MS + rampMs / 2) / rampMs));
-    curL = stepToward(curL, tgtL, step);
-    curR = stepToward(curR, tgtR, step);
-  }
+  curL = rampOne(curL, tgtL);
+  curR = rampOne(curR, tgtR);
   applyOutput();
 }
 
@@ -239,7 +252,7 @@ void printState(Stream &out) {
   out.print(F("cps  bal "));     out.print(balOn ? F("on ") : F("off "));
   out.print((int)lroundf((balI + balP) * 100)); out.print(F("%  motor "));
   out.print(outL); out.print(' '); out.print(outR);
-  out.print(F("  ramp "));       out.print(rampMs);
+  out.print(F("  ramp "));       out.print(rampMs); out.print('/'); out.print(rampDownMs);
   out.print(F("ms  link "));     out.println(linkAlive ? F("up") : F("down"));
 }
 
@@ -275,9 +288,14 @@ void handleLine(char *line, Stream &out, bool fromLink) {
     out.print(F("[cmd] balance ")); out.println(balOn ? F("on") : F("off"));
     return;
   }
+  if (strncmp(line, "rampd", 5) == 0) {
+    rampDownMs = (uint16_t)constrain(atol(line + 5), 0, 10000);
+    out.print(F("[cmd] ramp down = ")); out.print(rampDownMs); out.println(F(" ms (255->0)"));
+    return;
+  }
   if (strncmp(line, "ramp", 4) == 0) {
     rampMs = (uint16_t)constrain(atol(line + 4), 0, 10000);
-    out.print(F("[cmd] ramp = ")); out.print(rampMs); out.println(F(" ms"));
+    out.print(F("[cmd] ramp up = ")); out.print(rampMs); out.println(F(" ms (0->255)"));
     return;
   }
   if (n == 1) {
@@ -325,7 +343,7 @@ void setup() {
 
   Serial.begin(115200);
   link.begin(LINK_BAUD);
-  Serial.println(F("[uno] drive link ready (front 2WD, encoder balance). f/b/l/r/s/?/e/ramp<ms>/bal0/bal1"));
+  Serial.println(F("[uno] drive link ready (front 2WD, encoder balance). f/b/l/r/s/?/e/ramp<ms>/rampd<ms>/bal0/bal1"));
 }
 
 void loop() {

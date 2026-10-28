@@ -7,6 +7,10 @@
  *   3. arm    활성화
  *   용기가 바뀌면 arm 전에 zf<값> (슬로싱 주파수). 값은 저장되지 않으니 부팅마다 다시 친다.
  *
+ *   CAN 이 끊기면(BUS_OFF) 보드가 스스로 버스를 복구하고 모터를 끈 채로 둔다. 트레이가 갑자기
+ *   살아나는 일은 없다. 로그에 "!! CAN BUS_OFF" / ">>> CAN 복구됨" 이 찍히면 24 V 를 껐다 켜고
+ *   (모터 쪽도 잠긴다) 다시 lv → z → arm. [stat] 줄의 CAN 상태·오류 카운터로 끊기기 전 조짐을 본다.
+ *
  * 시리얼 명령 (115200)  —  ★ 부팅 기본값
  *
  *   동작
@@ -538,6 +542,8 @@ volatile bool ctrlBusy = false;
 #define RTOS_DIAG 1
 volatile uint32_t dgMaxUs = 0, dgOver = 0, dgResync = 0;
 volatile uint32_t dgTxFail = 0, dgSnapDrop = 0, dgEvtDrop = 0, dgCmdDrop = 0;
+bool canOk      = false;   // twai 설치·시작 성공
+bool canWasDown = false;   // BUS_OFF/STOPPED 를 겪었다 — 버스가 살아나면 모터 disable 을 다시 보낸다
 
 /* ZV 계수는 zv_n1/A1/A2/A3 네 개가 한 세트라 따로 읽으면 섞인 조합이 나온다.
  * 링버퍼(zv_p/zv_r/zv_head)도 zvClear 가 통째로 지우므로 같은 문제가 있다.
@@ -1064,6 +1070,16 @@ void printStatus() {
                 DIR_PITCH, DIR_ROLL, imu_ok ? "OK" : "FAULT");
   Serial.printf("       Kp 안쪽 %.2f / 바깥 %.2f    Kd 안쪽 %.3f / 바깥 %.3f\n",
                 KP_PITCH, KP_ROLL, KD_PITCH, KD_ROLL);
+  {
+    twai_status_info_t ts = {};
+    const char *cs = "미설치";
+    if (canOk && twai_get_status_info(&ts) == ESP_OK)
+      cs = (ts.state == TWAI_STATE_RUNNING) ? "RUNNING" : (ts.state == TWAI_STATE_BUS_OFF) ? "BUS_OFF" :
+           (ts.state == TWAI_STATE_RECOVERING) ? "RECOVERING" : "STOPPED";
+    Serial.printf("       CAN %s   TX오류 %lu  RX오류 %lu  TX실패 %lu  송신대기 %lu  (오류 카운터 128 넘으면 끊기기 직전)\n",
+                  cs, (unsigned long)ts.tx_error_counter, (unsigned long)ts.rx_error_counter,
+                  (unsigned long)dgTxFail, (unsigned long)ts.msgs_to_tx);
+  }
   Serial.printf("       피드포워드 %s   J %.4f/%.4f   v_des %+.0f°/s  t_ff %+.2f N·m\n",
                 FF_ON ? "ON " : "OFF", FF_J_PITCH, FF_J_ROLL, ff_vel_p,
                 constrain(FF_J_PITCH * ff_acc_p * DEG_TO_RAD, -FF_TMAX, FF_TMAX));
@@ -1484,8 +1500,10 @@ void setup() {
   twai_general_config_t g = TWAI_GENERAL_CONFIG_DEFAULT(CAN_TX_PIN, CAN_RX_PIN, TWAI_MODE_NORMAL);
   twai_timing_config_t  t = TWAI_TIMING_CONFIG_1MBITS();
   twai_filter_config_t  f = TWAI_FILTER_CONFIG_ACCEPT_ALL();
-  twai_driver_install(&g, &t, &f);
-  twai_start();
+  esp_err_t canInst  = twai_driver_install(&g, &t, &f);
+  esp_err_t canStart = (canInst == ESP_OK) ? twai_start() : ESP_FAIL;
+  canOk = (canInst == ESP_OK && canStart == ESP_OK);
+  Serial.printf("=== CAN 드라이버 %s (install=%d start=%d) ===\n", canOk ? "OK" : "실패", (int)canInst, (int)canStart);
   delay(100);
   broadcastUniversal(0xFD);        // 부팅 시 비활성
 
@@ -1801,11 +1819,39 @@ void ctrlTask(void *arg) {
         configSensor();
         motorsDisarm("센서 리셋");
       }
-      qprintf("[stat] %s Kp=%.1f Kd=%.2f 모터P=%s R=%s 피드백:%lu | 무보정:%lu/%lu I2C오류:%lu\n",
+      twai_status_info_t ts = {};
+      const char *canState = "미설치";
+      if (canOk && twai_get_status_info(&ts) == ESP_OK) {
+        canState = (ts.state == TWAI_STATE_RUNNING)    ? "RUNNING" :
+                   (ts.state == TWAI_STATE_BUS_OFF)    ? "BUS_OFF" :
+                   (ts.state == TWAI_STATE_RECOVERING) ? "RECOVERING" : "STOPPED";
+      }
+      qprintf("[stat] %s Kp=%.1f Kd=%.2f 모터P=%s R=%s 피드백:%lu | CAN %s TX오류 %lu RX오류 %lu TX실패 %lu | 무보정:%lu/%lu I2C오류:%lu\n",
                     armed ? "ARMED" : "STOP", KP_PITCH, KD_PITCH,
                     statusName(last_status[CAN_ID_PITCH & 0x03]),
                     statusName(last_status[CAN_ID_ROLL  & 0x03]),
-                    fb_count, err_win, n_win, i2c_err);
+                    fb_count, canState, (unsigned long)ts.tx_error_counter, (unsigned long)ts.rx_error_counter,
+                    (unsigned long)dgTxFail, err_win, n_win, i2c_err);
+      /* BUS_OFF 복구. twai 는 ctrlTask 만 만진다 (ioTask 에서 걸면 크래시 — 와이파이판 기록).
+       * 순서: BUS_OFF → initiate_recovery → (드라이버가 STOPPED 로 내려옴) → twai_start → RUNNING.
+       * 버스가 죽어 있던 동안 보낸 disable 은 나가지 못했고 모터는 마지막 지령을 붙잡고 있다.
+       * 살아나면 무조건 끈다 — 제어가 갑자기 되살아나 트레이가 튀는 일이 없게. 사용자가 다시 arm.
+       */
+      if (canOk && ts.state == TWAI_STATE_BUS_OFF) {
+        twai_initiate_recovery();
+        canWasDown = true;
+        qprintf("!! CAN BUS_OFF — 복구 시작 (TX오류 %lu RX오류 %lu)\n",
+                (unsigned long)ts.tx_error_counter, (unsigned long)ts.rx_error_counter);
+      } else if (canOk && ts.state == TWAI_STATE_STOPPED) {
+        twai_start();
+        canWasDown = true;
+        qprintln("!! CAN STOPPED — 재시작");
+      } else if (canOk && ts.state == TWAI_STATE_RUNNING && canWasDown) {
+        canWasDown = false;
+        if (armed) motorsDisarm("CAN 복구 — 다시 arm 하세요");
+        else       broadcastUniversal(0xFD);
+        qprintln(">>> CAN 복구됨 — 모터 disable 재전송. 24 V 껐다 켠 뒤 lv → z → arm");
+      }
 #if RTOS_DIAG
       qprintf("[rtos] 최대틱 %luus  10ms초과 %lu  재동기 %lu | "
               "TX실패 %lu 샘플드롭 %lu 이벤트드롭 %lu 명령드롭 %lu\n",

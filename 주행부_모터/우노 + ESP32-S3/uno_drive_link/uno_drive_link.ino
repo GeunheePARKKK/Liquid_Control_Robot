@@ -35,7 +35,9 @@
  *     ramp<ms>           가속 램프 시간 (0→255 기준, 0 = 램프 없음)
  *     rampd<ms>          감속 램프 시간 (255→0 기준). x 를 쳐도 이 시간에 걸쳐 서서히 선다
  *     e ?                엔코더 0 / 상태
- *     bal0 / bal1        엔코더 좌우 균형 보정 끄기 / 켜기 (기본 켬)
+ *     bal0 / bal1        엔코더 좌우 균형 보정 끄기 / 켜기 (기본 끔 — 아래 trim 주석 참고)
+ *     trim<n>            고정 오조준 n % (−50~50). 양수 = 오른쪽 바퀴를 n % 줄임 (왼쪽으로 휠 때),
+ *                        음수 = 왼쪽 바퀴를 줄임. EEPROM 에 저장되어 전원을 껐다 켜도 남는다
  *     (f b l r 테스트는 USB 전용 — ESP32 가 보내는 M 에 바로 덮인다)
  *   우노 → ESP32 (SEND_STATUS 1 일 때만. SoftwareSerial 은 보내는 동안 못 받으므로 기본 0)
  *     E <encL> <encR> <pwmL> <pwmR>   200ms 마다 상태
@@ -59,12 +61,14 @@
  *   e               엔코더 카운트 0 으로
  *   ramp<ms>        가속 램프 (예: ramp0, ramp700)     rampd<ms>  감속 램프 (예: rampd1500)
  *   bal0 / bal1     엔코더 좌우 균형 보정 끄기 / 켜기
+ *   trim<n>         고정 오조준 (예: trim8 = 오른쪽 8 % 줄임, trim-5 = 왼쪽 5 % 줄임, trim0 해제)
  *
  *   'f' 를 쳤는데 한쪽 바퀴가 뒤로 돌면 그쪽 *_INVERT 를 뒤집는다.
  * -----------------------------------------------------------------------------
  */
 
 #include <SoftwareSerial.h>
+#include <EEPROM.h>
 
 // =============================================================================
 //  핀
@@ -106,7 +110,10 @@
 //   빠른 쪽을 줄이고 느린 쪽을 올린다.  bal0 / bal1 로 끄고 켠다.
 #define SPEED_MS         50     // 속도 측정 주기
 #define SPEED_LPF        0.4f   // 속도 저역 필터 (0~1, 클수록 빠름)
-#define BAL_DEFAULT      1      // 1 = 균형 제어 켜고 시작
+#define BAL_DEFAULT      0      // 1 = 균형 제어 켜고 시작. 기본 끔: FR 엔코더(D7)가 폴링이라 SoftwareSerial 수신 중
+                                //   펄스를 놓쳐 오른쪽이 느린 걸로 잘못 재고 오른쪽을 더 밀어 왼쪽으로 휘었다 (2026-10-28).
+                                //   S11 보고를 끄고 bal1 로 켜서 ? 의 spd 가 좌우 비슷하게 나오면 써도 된다.
+#define TRIM_EE_ADDR     0      // EEPROM: [0]=0x5A 표식, [1]=trim %
 #define BAL_KP           0.3f   // 비례
 #define BAL_KI           1.0f   // 적분 (/s)
 #define BAL_TRIM_MAX     0.35f  // trim 한계 (±35 %)
@@ -128,6 +135,7 @@ bool     linkAlive   = false;
 float    spdL = 0, spdR = 0;      // 측정 속도 (counts/s, 필터)
 float    balI = 0, balP = 0;      // 균형 trim 의 적분·비례 성분
 bool     balOn = BAL_DEFAULT;
+int8_t   trimPct = 0;             // 고정 오조준 %. +: 오른쪽 줄임, −: 왼쪽 줄임
 int      outL = 0, outR = 0;      // 균형 보정 뒤 실제 모터에 간 값
 uint32_t lastSpeedMs = 0;
 long     lastEncL = 0, lastEncR = 0;
@@ -156,8 +164,11 @@ void outMotor(uint8_t pwmPin, uint8_t dirPin, int v, bool inv) {
 
 void applyOutput() {
   float t = balOn ? constrain(balI + balP, -BAL_TRIM_MAX, BAL_TRIM_MAX) : 0.0f;
-  outL = constrain((int)lroundf(curL * (1.0f - t)), -255, 255);
-  outR = constrain((int)lroundf(curR * (1.0f + t)), -255, 255);
+  float mL = 1.0f, mR = 1.0f;                       // 고정 오조준: 한쪽만 줄인다
+  if (trimPct > 0) mR = 1.0f - trimPct / 100.0f;
+  if (trimPct < 0) mL = 1.0f + trimPct / 100.0f;
+  outL = constrain((int)lroundf(curL * (1.0f - t) * mL), -255, 255);
+  outR = constrain((int)lroundf(curR * (1.0f + t) * mR), -255, 255);
   outMotor(L_PWM, L_DIR, outL, L_INVERT);
   outMotor(R_PWM, R_DIR, outR, R_INVERT);
   if (curL) encSignL = (curL > 0) ? 1 : -1;
@@ -250,7 +261,7 @@ void printState(Stream &out) {
   out.print(F("  enc "));        out.print(encL); out.print(' '); out.print(encR);
   out.print(F("  spd "));        out.print((int)spdL); out.print(' '); out.print((int)spdR);
   out.print(F("cps  bal "));     out.print(balOn ? F("on ") : F("off "));
-  out.print((int)lroundf((balI + balP) * 100)); out.print(F("%  motor "));
+  out.print((int)lroundf((balI + balP) * 100)); out.print(F("%  trim ")); out.print(trimPct); out.print(F("%  motor "));
   out.print(outL); out.print(' '); out.print(outR);
   out.print(F("  ramp "));       out.print(rampMs); out.print('/'); out.print(rampDownMs);
   out.print(F("ms  link "));     out.println(linkAlive ? F("up") : F("down"));
@@ -280,6 +291,14 @@ void handleLine(char *line, Stream &out, bool fromLink) {
     hardStop();
     testUntilMs = 0;
     out.println(F("[cmd] emergency stop"));
+    return;
+  }
+  if (strncmp(line, "trim", 4) == 0 && (isDigit(line[4]) || line[4] == '-')) {
+    trimPct = (int8_t)constrain(atoi(line + 4), -50, 50);
+    EEPROM.update(TRIM_EE_ADDR, 0x5A);
+    EEPROM.update(TRIM_EE_ADDR + 1, (uint8_t)trimPct);
+    out.print(F("[cmd] trim = ")); out.print(trimPct);
+    out.println(trimPct > 0 ? F("%  (오른쪽 줄임, 저장됨)") : trimPct < 0 ? F("%  (왼쪽 줄임, 저장됨)") : F("%  (해제, 저장됨)"));
     return;
   }
   if (strncmp(line, "bal", 3) == 0 && (line[3] == '0' || line[3] == '1')) {
@@ -343,7 +362,10 @@ void setup() {
 
   Serial.begin(115200);
   link.begin(LINK_BAUD);
-  Serial.println(F("[uno] drive link ready (front 2WD, encoder balance). f/b/l/r/s/?/e/ramp<ms>/rampd<ms>/bal0/bal1"));
+  if (EEPROM.read(TRIM_EE_ADDR) == 0x5A) trimPct = (int8_t)EEPROM.read(TRIM_EE_ADDR + 1);
+  trimPct = constrain(trimPct, -50, 50);
+  Serial.print(F("[uno] trim ")); Serial.print(trimPct); Serial.println(F("% (EEPROM)"));
+  Serial.println(F("[uno] drive link ready (front 2WD, encoder balance). f/b/l/r/s/?/e/ramp<ms>/rampd<ms>/trim<n>/bal0/bal1"));
 }
 
 void loop() {

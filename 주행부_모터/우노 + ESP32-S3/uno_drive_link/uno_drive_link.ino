@@ -97,7 +97,7 @@
 #define LINK_BAUD        9600   // SoftwareSerial 은 느릴수록 안정. 20Hz×10바이트면 9600 으로 충분
 #define LINK_TIMEOUT_MS  300    // M 이 이만큼 안 오면 정지
 #define RAMP_MS_DEFAULT       700   // 가속 램프: 0→255 시간 (ramp)
-#define RAMP_DOWN_MS_DEFAULT  800   // 감속 램프: 255→0 시간 (rampd). 1500 은 너무 느려 800 으로 (2026-10-29)
+#define RAMP_DOWN_MS_DEFAULT  400   // 감속 램프: 255→0 시간 (rampd). ESP32 의 x<ms> 가 이 값을 바꾼다 (2026-10-29)
 #define RAMP_TICK_MS     10
 #define SEND_STATUS      0      // 1 이면 E 상태를 S11 로 보냄. 보내는 동안 수신이 막히므로 S11 안 쓰면 0
 #define STATUS_MS        200    // E 상태 전송 주기

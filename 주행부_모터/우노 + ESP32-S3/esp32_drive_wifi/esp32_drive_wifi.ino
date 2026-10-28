@@ -35,7 +35,8 @@
  *   w3                3단 속도로 바로 전진 (a/s/d 도 동일). 단계 = vmin + (n−1)·vstep, 마지막 단은 v.
  *                     기본값(vmin70 vstep20 v255)이면 11단: w1=70 … w10=250, w11=255
  *   w1500             단계 수보다 큰 수는 ms 시간: 1500ms 동안 전진 후 자동 정지
- *   x  stop  빈 줄     정지 (우노 램프 따라 서서히)
+ *   x  stop  빈 줄     정지 (우노 감속 램프 rampd 를 따라)
+ *   x300              감속 램프를 300 ms(255→0 기준)로 바꾸고 정지. 그 뒤 x 만 쳐도 300 유지
  *   !                 비상 정지 (램프 없이 즉시)
  *   v<0~255>          최고 속도 (기본 255 = PWM 최대). 주행 중이면 현재 속도를 이 값으로 바로 바꿈
  *   vmin<0~255>       첫 단계 속도 (기본 70)
@@ -235,6 +236,13 @@ void handleLine(char *line) {
     stopDrive(n == 0 ? "빈 줄" : line);
     return;
   }
+  if (line[0] == 'x' && n > 1 && isDigit(line[1])) {   // x300: 감속 램프 지정 후 정지
+    long ms = atol(line + 1);
+    Serial1.printf("rampd%ld\n", ms);
+    outPrintf("[cmd] -> uno: rampd%ld (감속 %ld ms, 이후 x 에도 적용)\n", ms, ms);
+    stopDrive("x");
+    return;
+  }
   if (strcmp(line, "!") == 0) { emergencyStop(); return; }
 
   char k = line[0];
@@ -322,7 +330,7 @@ void setup() {
                 WIFI_SSID, WIFI_PASS, WiFi.softAPIP().toString().c_str(), TCP_PORT);
   Serial.printf("=== 우노 링크 Serial1 TX=%d RX=%d %d baud ===\n", UNO_TX_PIN, UNO_RX_PIN, UNO_BAUD);
   Serial.printf("=== 리셋 원인: %s ===\n", resetReasonStr());
-  Serial.println("명령: w a s d (또 누르면 가속, w3 = 3단, w1500 = 1.5초) / x 정지 / ! 비상 / v255 vmin70 vstep20 / hold0 / ramp700 rampd1500 / ?");
+  Serial.println("명령: w a s d (또 누르면 가속, w3 = 3단, w1500 = 1.5초) / x 정지 / ! 비상 / v255 vmin70 vstep20 / hold0 / ramp700 rampd400 (x300 = 감속 300ms 로 정지) / ?");
   emergencyStop();
 }
 
@@ -339,7 +347,7 @@ void loop() {
       tcpClient.setNoDelay(true);
       outPrintf(">>> TCP 접속 %s\n", tcpClient.remoteIP().toString().c_str());
       outPrintf("보드 가동 %lu s  리셋 원인: %s\n", (unsigned long)(millis() / 1000), resetReasonStr());
-      outPrintf("명령: w a s d (또 누르면 가속, w3 = 3단, w1500 = 1.5초) / x 정지 / ! 비상 / v255 vmin70 vstep20 / hold0 / ramp700 rampd1500 / ?\n");
+      outPrintf("명령: w a s d (또 누르면 가속, w3 = 3단, w1500 = 1.5초) / x 정지 / ! 비상 / v255 vmin70 vstep20 / hold0 / ramp700 rampd400 (x300 = 감속 300ms 로 정지) / ?\n");
     }
   }
   // ── TCP 끊김 → 정지 ──

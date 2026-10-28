@@ -32,7 +32,9 @@
  *                     처음 누르면 vmin(기본 70) 으로 천천히, 같은 키를 또 누를 때마다
  *                     vstep(기본 20) 씩 빨라져 v(기본 255, 하드웨어 최대) 까지.
  *                     다른 키·정지 뒤엔 다시 vmin 부터
- *   w1500             1500ms 동안 전진 후 자동 정지 (a/s/d 도 동일). 실험 사이클용. 단계 올리기는 같음
+ *   w3                3단 속도로 바로 전진 (a/s/d 도 동일). 단계 = vmin + (n−1)·vstep, 마지막 단은 v.
+ *                     기본값(vmin70 vstep20 v255)이면 11단: w1=70 … w10=250, w11=255
+ *   w1500             단계 수보다 큰 수는 ms 시간: 1500ms 동안 전진 후 자동 정지
  *   x  stop  빈 줄     정지 (우노 램프 따라 서서히)
  *   !                 비상 정지 (램프 없이 즉시)
  *   v<0~255>          최고 속도 (기본 255 = PWM 최대). 주행 중이면 현재 속도를 이 값으로 바로 바꿈
@@ -205,6 +207,10 @@ void startDrive(char key, uint32_t durMs, bool bump) {
 //  우노 → 보드
 // =============================================================================
 void handleUnoLine(char *line) {
+  /* S11 선이 안 꽂혀 있으면 RX 가 떠서 옆 TX 의 "M 0 0" 을 잡음으로 주워 읽는다 (풀업을 걸어도 완전히는 못 막는다).
+   * 우노는 ASCII 만 보내므로 그 밖의 바이트가 섞인 줄은 버린다. */
+  for (char *c = line; *c; c++)
+    if ((uint8_t)*c < 0x20 || (uint8_t)*c > 0x7E) return;
   if (strncmp(line, "E ", 2) == 0) {
     long a, b; int c, d;
     if (sscanf(line + 2, "%ld %ld %d %d", &a, &b, &c, &d) == 4) {
@@ -233,8 +239,14 @@ void handleLine(char *line) {
 
   char k = line[0];
   if ((k == 'w' || k == 'a' || k == 's' || k == 'd') && (n == 1 || isDigit(line[1]))) {
-    uint32_t dur = (n > 1) ? (uint32_t)atol(line + 1) : 0;
-    startDrive(k, dur, true);
+    long num = (n > 1) ? atol(line + 1) : 0;
+    int stages = (speedVal <= speedMin) ? 1 : 1 + (speedVal - speedMin + speedStep - 1) / speedStep;  // 기본 11
+    if (num >= 1 && num <= stages) {                   // 단계 번호: 그 속도로 바로
+      speedCur = speedMin + (int)(num - 1) * speedStep;  // 마지막 단은 startDrive 에서 v 로 잘림
+      startDrive(k, 0, false);                         // bump=false: 위에서 정한 단계 유지
+    } else {
+      startDrive(k, (uint32_t)num, true);              // 0 = 그냥 w, 단계 수 초과 = ms
+    }
     return;
   }
   if (strncmp(line, "vmin", 4) == 0 && isDigit(line[4])) {
@@ -298,6 +310,7 @@ LineBuf usbBuf, tcpBuf, unoBuf;
 // =============================================================================
 void setup() {
   Serial.begin(115200);
+  pinMode(UNO_RX_PIN, INPUT_PULLUP);      // S11 미연결 시 RX 가 떠서 잡음 → 유휴 HIGH 로 고정
   Serial1.begin(UNO_BAUD, SERIAL_8N1, UNO_RX_PIN, UNO_TX_PIN);
 
   WiFi.mode(WIFI_AP);
@@ -309,7 +322,7 @@ void setup() {
                 WIFI_SSID, WIFI_PASS, WiFi.softAPIP().toString().c_str(), TCP_PORT);
   Serial.printf("=== 우노 링크 Serial1 TX=%d RX=%d %d baud ===\n", UNO_TX_PIN, UNO_RX_PIN, UNO_BAUD);
   Serial.printf("=== 리셋 원인: %s ===\n", resetReasonStr());
-  Serial.println("명령: w a s d (또 누르면 가속, w1500 = 1.5초) / x 정지 / ! 비상 / v255 vmin70 vstep20 / hold0 / ramp700 rampd1500 / ?");
+  Serial.println("명령: w a s d (또 누르면 가속, w3 = 3단, w1500 = 1.5초) / x 정지 / ! 비상 / v255 vmin70 vstep20 / hold0 / ramp700 rampd1500 / ?");
   emergencyStop();
 }
 
@@ -326,7 +339,7 @@ void loop() {
       tcpClient.setNoDelay(true);
       outPrintf(">>> TCP 접속 %s\n", tcpClient.remoteIP().toString().c_str());
       outPrintf("보드 가동 %lu s  리셋 원인: %s\n", (unsigned long)(millis() / 1000), resetReasonStr());
-      outPrintf("명령: w a s d (또 누르면 가속, w1500 = 1.5초) / x 정지 / ! 비상 / v255 vmin70 vstep20 / hold0 / ramp700 rampd1500 / ?\n");
+      outPrintf("명령: w a s d (또 누르면 가속, w3 = 3단, w1500 = 1.5초) / x 정지 / ! 비상 / v255 vmin70 vstep20 / hold0 / ramp700 rampd1500 / ?\n");
     }
   }
   // ── TCP 끊김 → 정지 ──
